@@ -71,8 +71,8 @@ void main( void )
 }
 
 // GetFragmentShader combines the dynamic preamble, the user's shader code, and the main wrapper.
-func GetFragmentShader(preamble, shadercode string) string {
-	return preamble + shadercode + getMain()
+func GetFragmentShader(preamble, commoncode, shadercode string) string {
+	return preamble + commoncode + shadercode + getMain()
 }
 
 func runShadertoy(shaderArgs *shadertoy.ShaderArgs) {
@@ -165,7 +165,7 @@ func runShadertoy(shaderArgs *shadertoy.ShaderArgs) {
 
 	// fullFragmentSource := GetFragmentShader(shaderArgs.ShaderCode)
 	preamble := generatePreamble(channels)
-	fullFragmentSource := GetFragmentShader(preamble, shaderArgs.ShaderCode)
+	fullFragmentSource := GetFragmentShader(preamble, shaderArgs.CommonCode, shaderArgs.ShaderCode)
 
 	fsShader, err := translator.TranslateShader(fullFragmentSource, "fragment", gst.ShaderSpecWebGL2, gst.OutputFormatGLSL410)
 	if err != nil {
