@@ -25,6 +25,9 @@ precision highp float;
 precision highp int;
 precision mediump sampler3D;
 
+// it's 2025, so this is always 1
+#define HW_PERFORMANCE 1
+
 uniform vec3 iResolution;
 uniform float iTime;
 uniform vec4 iMouse;

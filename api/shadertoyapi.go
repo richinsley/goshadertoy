@@ -61,6 +61,7 @@ func init() {
 type ShadertoyResponse struct {
 	Shader *Shader `json:"Shader"`
 	Error  string  `json:"Error,omitempty"`
+	IsAPI  bool    `json:"isAPI,omitempty"` // Indicates if this is an API response
 }
 
 type Shader struct {
@@ -75,10 +76,11 @@ type ShaderInfo struct {
 }
 
 type RenderPass struct {
-	Inputs []Input `json:"inputs"`
-	Code   string  `json:"code"`
-	Name   string  `json:"name"`
-	Type   string  `json:"type"`
+	Inputs  []Input  `json:"inputs"`
+	Outputs []Output `json:"outputs"`
+	Code    string   `json:"code"`
+	Name    string   `json:"name"`
+	Type    string   `json:"type"`
 }
 
 type Input struct {
@@ -88,12 +90,80 @@ type Input struct {
 	Sampler Sampler `json:"sampler"`
 }
 
+type Output struct {
+	Id      int `json:"id"`
+	Channel int `json:"channel"`
+}
+
 type Sampler struct {
 	Filter   string `json:"filter"`
 	Wrap     string `json:"wrap"`
 	VFlip    string `json:"vflip"`
 	SRGB     string `json:"srgb"`
 	Internal string `json:"internal"`
+}
+
+// raw shader data is ever so slightly different from the API response.
+type rawShaderResponse []rawShader
+
+type rawShader struct {
+	Info          ShaderInfo      `json:"info"`
+	RawRenderPass []rawRenderPass `json:"renderpass"`
+}
+
+type rawRenderPass struct {
+	Inputs  []rawInput  `json:"inputs"`
+	Outputs []rawOutput `json:"outputs"`
+	Code    string      `json:"code"`
+	Name    string      `json:"name"`
+	Type    string      `json:"type"`
+}
+
+type rawInput struct {
+	Id          string  `json:"id"`
+	Filepath    string  `json:"filepath"`
+	PreviewFile string  `json:"previewfilepath"`
+	Type        string  `json:"type"`
+	Channel     int     `json:"channel"`
+	Sampler     Sampler `json:"sampler"`
+	Published   int     `json:"published"`
+}
+
+type rawOutput struct {
+	Id      string `json:"id"`
+	Channel int    `json:"channel"`
+}
+
+func rawShaderToShader(raw rawShader) *Shader {
+	shader := &Shader{
+		Info:       raw.Info,
+		RenderPass: make([]RenderPass, len(raw.RawRenderPass)),
+	}
+
+	for i, rPass := range raw.RawRenderPass {
+		shader.RenderPass[i] = RenderPass{
+			Inputs:  make([]Input, len(rPass.Inputs)),
+			Outputs: make([]Output, len(rPass.Outputs)),
+			Code:    rPass.Code,
+			Name:    rPass.Name,
+			Type:    rPass.Type,
+		}
+		for j, inp := range rPass.Inputs {
+			shader.RenderPass[i].Inputs[j] = Input{
+				Channel: inp.Channel,
+				CType:   inp.Type,
+				Src:     inp.Filepath, // Use Filepath for raw inputs
+				Sampler: inp.Sampler,
+			}
+		}
+		for j, out := range rPass.Outputs {
+			shader.RenderPass[i].Outputs[j] = Output{
+				// Id:      out.Id,
+				Channel: out.Channel,
+			}
+		}
+	}
+	return shader
 }
 
 // --- Structs for Processed Shader Data ---
@@ -470,7 +540,8 @@ func ShaderFromID(apikey string, idOrURL string, useCache bool) (*ShadertoyRespo
 	if useCache && err != nil {
 		return nil, fmt.Errorf("could not get cache directory: %w", err)
 	}
-	fmt.Printf("Using cache directory: %s\n", cacheDir)
+
+	log.Printf("Using cache directory: %s\n", cacheDir)
 
 	if apikey == "" {
 		apikey, err = getAPIKey()
@@ -506,12 +577,35 @@ func ShaderFromID(apikey string, idOrURL string, useCache bool) (*ShadertoyRespo
 	}
 
 	var shaderResp ShadertoyResponse
-	if err := json.NewDecoder(resp.Body).Decode(&shaderResp); err != nil {
+	// get the bytes from the response body
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	if err := json.Unmarshal(bodyBytes, &shaderResp); err != nil {
 		return nil, fmt.Errorf("failed to decode shader JSON: %w", err)
 	}
 
 	if shaderResp.Error != "" {
-		return nil, fmt.Errorf("shadertoy API error for %s: %s (is it public+api?)", shaderID, shaderResp.Error)
+		// try a raw request instead
+		log.Printf("Warning: Shadertoy API error for %s: %s (is it public+api?)", shaderID, shaderResp.Error)
+		rawData, err := GetRawAPIShaderData(shaderID)
+
+		if err != nil {
+			return nil, fmt.Errorf("failed to fetch raw shader data for %s: %w", shaderID, err)
+		}
+		var rawResp rawShaderResponse
+		if err := json.Unmarshal([]byte(rawData), &rawResp); err != nil {
+			return nil, fmt.Errorf("failed to decode raw shader JSON: %w", err)
+		}
+		if len(rawResp) == 0 {
+			return nil, fmt.Errorf("raw shader response is empty for %s", shaderID)
+		}
+		// Convert raw response to ShadertoyResponse
+		nshader := rawShaderToShader(rawResp[0])
+		shaderResp = ShadertoyResponse{
+			Shader: nshader, // Use the first shader in the raw response
+			IsAPI:  false,   // Mark this as a raw response
+		}
+	} else {
+		shaderResp.IsAPI = true // Mark this as an API response
 	}
 
 	if shaderResp.Shader == nil {

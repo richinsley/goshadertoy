@@ -41,7 +41,7 @@ func runShadertoy(shaderArgs *api.ShaderArgs) {
 	// Generate the full fragment shader source
 	fullFragmentSource := shader.GetFragmentShader(channels, shaderArgs.CommonCode, shaderArgs.ShaderCode)
 
-	fsShader, err := translator.TranslateShader(fullFragmentSource, "fragment", gst.ShaderSpecWebGL2, gst.OutputFormatGLSL410)
+	fsShader, err := translator.TranslateShader(fullFragmentSource, "fragment", gst.ShaderSpecWebGL2, gst.OutputFormatGLSL330)
 	if err != nil {
 		log.Fatalf("Fragment shader translation failed: %v", err)
 	}
