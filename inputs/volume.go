@@ -5,7 +5,7 @@ import (
 	"log"
 
 	"github.com/go-gl/gl/v4.1-core/gl"
-	"github.com/richinsley/goshadertoy"
+	api "github.com/richinsley/goshadertoy/api"
 )
 
 // VolumeChannel represents a 3D volume texture input.
@@ -14,11 +14,11 @@ type VolumeChannel struct {
 	ctype      string
 	textureID  uint32
 	resolution [3]float32
-	sampler    goshadertoy.Sampler
+	sampler    api.Sampler
 }
 
 // NewVolumeChannel creates and initializes a new OpenGL 3D texture from parsed .bin volume data.
-func NewVolumeChannel(index int, vol *goshadertoy.VolumeData, sampler goshadertoy.Sampler) (*VolumeChannel, error) {
+func NewVolumeChannel(index int, vol *api.VolumeData, sampler api.Sampler) (*VolumeChannel, error) {
 	if vol == nil || vol.Data == nil {
 		return nil, fmt.Errorf("input volume data for channel %d is nil", index)
 	}

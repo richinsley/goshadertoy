@@ -1,0 +1,72 @@
+package shader
+
+import (
+	"fmt"
+
+	inputs "github.com/richinsley/goshadertoy/inputs"
+)
+
+// A simple vertex shader for drawing a fullscreen quad.
+const vertexShaderSource = `#version 410 core
+layout (location = 0) in vec2 in_vert;
+void main() {
+    gl_Position = vec4(in_vert, 0.0, 1.0);
+}
+`
+
+func GenerateVertexShader() string {
+	return vertexShaderSource
+}
+
+// GeneratePreamble creates the GLSL preamble with dynamic sampler types.
+func GeneratePreamble(channels []inputs.IChannel) string {
+	basePreamble := `#version 300 es
+precision highp float;
+precision highp int;
+precision mediump sampler3D;
+
+uniform vec3 iResolution;
+uniform float iTime;
+uniform vec4 iMouse;
+uniform vec3 iChannelResolution[4];
+uniform int iFrame;
+`
+	// Dynamically declare iChannel samplers based on their type
+	channelDecls := ""
+	for i := 0; i < 4; i++ {
+		samplerType := "sampler2D" // Default to sampler2D
+		if channels[i] != nil {
+			samplerType = channels[i].GetSamplerType()
+		}
+		channelDecls += fmt.Sprintf("uniform %s iChannel%d;\n", samplerType, i)
+	}
+
+	// Other defines and helper functions here
+	postamble := `
+in vec2 frag_coord_uv;
+out vec4 fragColor;
+
+#define FAST_TANH_BODY(x)  ( (x) * (27.0 + (x)*(x)) / (27.0 + 9.0*(x)*(x)) )
+float fast_tanh(float x) { return FAST_TANH_BODY(x); }
+vec2  fast_tanh(vec2  x) { return FAST_TANH_BODY(x); }
+vec3  fast_tanh(vec3  x) { return FAST_TANH_BODY(x); }
+vec4  fast_tanh(vec4  x) { return FAST_TANH_BODY(x); }
+#define tanh fast_tanh
+`
+	return basePreamble + channelDecls + postamble
+}
+
+func GetMain() string {
+	return `
+void main( void )
+{
+    // The mainImage function expects pixel coordinates, which gl_FragCoord provides.
+    mainImage( fragColor, gl_FragCoord.xy );
+}
+`
+}
+
+// GetFragmentShader combines the dynamic preamble, the user's shader code, and the main wrapper.
+func GetFragmentShader(channels []inputs.IChannel, commoncode, shadercode string) string {
+	return GeneratePreamble(channels) + commoncode + shadercode + GetMain()
+}

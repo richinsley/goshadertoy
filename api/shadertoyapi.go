@@ -1,4 +1,4 @@
-package goshadertoy
+package api
 
 import (
 	"bytes"

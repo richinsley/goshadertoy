@@ -8,7 +8,7 @@ import (
 	"log"
 
 	"github.com/go-gl/gl/v4.1-core/gl"
-	"github.com/richinsley/goshadertoy"
+	api "github.com/richinsley/goshadertoy/api"
 )
 
 // ImageChannel represents a static image texture input.
@@ -17,7 +17,7 @@ type ImageChannel struct {
 	ctype      string
 	textureID  uint32
 	resolution [3]float32
-	sampler    goshadertoy.Sampler
+	sampler    api.Sampler
 }
 
 // vflip vertically flips the provided RGBA image. This is necessary when
@@ -38,7 +38,7 @@ func vflip(src *image.RGBA) *image.RGBA {
 }
 
 // NewImageChannel creates and initializes a new OpenGL texture from an image.
-func NewImageChannel(index int, img image.Image, sampler goshadertoy.Sampler) (*ImageChannel, error) {
+func NewImageChannel(index int, img image.Image, sampler api.Sampler) (*ImageChannel, error) {
 	if img == nil {
 		return nil, fmt.Errorf("input image for channel %d is nil", index)
 	}

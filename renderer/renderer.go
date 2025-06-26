@@ -6,7 +6,7 @@ import (
 
 	"github.com/go-gl/gl/v4.1-core/gl"
 	"github.com/richinsley/goshadertoy/glfwcontext"
-	"github.com/richinsley/goshadertoy/inputs"
+	inputs "github.com/richinsley/goshadertoy/inputs"
 	gst "github.com/richinsley/goshadertranslator"
 )
 
@@ -62,14 +62,14 @@ var quadVertices = []float32{
 }
 
 // InitScene compiles shaders and sets up vertex data.
-func (r *Renderer) InitScene(vertexShaderSource, fragmentShaderSource string, uniformMap map[string]gst.ShaderVariable, channels []inputs.IChannel) error {
+func (r *Renderer) InitScene(vertexShaderSource string, shader *gst.Shader, channels []inputs.IChannel) error {
 	var err error
-	r.shaderProgram, err = newProgram(vertexShaderSource, fragmentShaderSource)
+	r.shaderProgram, err = newProgram(vertexShaderSource, shader.Code)
 	if err != nil {
 		return fmt.Errorf("failed to create shader program: %w", err)
 	}
 	r.channels = channels // Store channels
-
+	uniformMap := shader.Variables
 	gl.UseProgram(r.shaderProgram)
 
 	// Query uniform locations using the mapped names from the translator.

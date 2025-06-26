@@ -7,7 +7,7 @@ import (
 	"log"
 
 	"github.com/go-gl/gl/v4.1-core/gl"
-	"github.com/richinsley/goshadertoy"
+	api "github.com/richinsley/goshadertoy/api"
 )
 
 // CubeMapChannel represents a cube map texture input.
@@ -16,11 +16,11 @@ type CubeMapChannel struct {
 	ctype      string
 	textureID  uint32
 	resolution [3]float32
-	sampler    goshadertoy.Sampler
+	sampler    api.Sampler
 }
 
 // NewCubeMapChannel creates and initializes a new OpenGL cube map texture from six images.
-func NewCubeMapChannel(index int, images [6]image.Image, sampler goshadertoy.Sampler) (*CubeMapChannel, error) {
+func NewCubeMapChannel(index int, images [6]image.Image, sampler api.Sampler) (*CubeMapChannel, error) {
 	for i, img := range images {
 		if img == nil {
 			return nil, fmt.Errorf("input image for cube map face %d is nil", i)
