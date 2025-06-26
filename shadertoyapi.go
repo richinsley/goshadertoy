@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 
 	// Blank imports for image decoders so image.Decode can handle them.
@@ -105,7 +106,7 @@ type ShadertoyChannel struct {
 	Data      image.Image    // For textures
 	Volume    *VolumeData    // For 3D volume textures
 	CubeData  [6]image.Image // For cubemaps
-	BufferRef string         // For buffer references ('A', 'B', 'C', 'D')
+	BufferRef int            // For buffer references ('0-A', '1-B', '2-C', '3-D')
 }
 
 // BufferRenderPass represents a processed buffer pass.
@@ -204,7 +205,7 @@ func getCacheDir(subdir string) (string, error) {
 }
 
 // downloadMediaChannels processes input descriptions, downloading textures as needed.
-func downloadMediaChannels(inputs []Input, useCache bool) ([]*ShadertoyChannel, bool, error) {
+func downloadMediaChannels(inputs []Input, passType string, useCache bool) ([]*ShadertoyChannel, bool, error) {
 	channels := make([]*ShadertoyChannel, 4)
 	complete := true
 
@@ -269,13 +270,20 @@ func downloadMediaChannels(inputs []Input, useCache bool) ([]*ShadertoyChannel, 
 			channel.Data = img
 
 		case "buffer":
-			// A "hack" to get the buffer letter for the channel.
-			if len(inp.Src) >= 5 {
-				bufferChar := inp.Src[len(inp.Src)-5] // e.g., 'A' from '/media/ap/XsfGzn.png?feed=BufferA'
-				channel.BufferRef = strings.ToUpper(string(bufferChar))
-			} else {
-				log.Printf("Warning: could not determine buffer reference from src: %s", inp.Src)
+			// Buffer inputs have a path of the form '/media/previz/buffer00.png'
+			// Remove file extension
+			nameWithoutExt := strings.TrimSuffix(inp.Src, filepath.Ext(inp.Src))
+
+			// Get last two characters
+			lastTwo := nameWithoutExt[len(nameWithoutExt)-2:]
+
+			// Convert to int
+			num, err := strconv.Atoi(lastTwo)
+			if err != nil {
+				log.Printf("invalid buffer reference in src: %s", inp.Src)
 				complete = false
+			} else {
+				channel.BufferRef = num
 			}
 		case "volume":
 			mediaURL := shadertoyMediaURL + inp.Src
@@ -549,7 +557,7 @@ func ShaderArgsFromJSON(shaderData *ShadertoyResponse, useCache bool) (*ShaderAr
 		case "image":
 			args.ShaderCode = rPass.Code
 			if len(rPass.Inputs) > 0 {
-				args.Inputs, inputsComplete, err = downloadMediaChannels(rPass.Inputs, useCache)
+				args.Inputs, inputsComplete, err = downloadMediaChannels(rPass.Inputs, rPass.Type, useCache)
 				if err != nil {
 					return nil, fmt.Errorf("error processing image pass inputs: %w", err)
 				}
@@ -564,7 +572,7 @@ func ShaderArgsFromJSON(shaderData *ShadertoyResponse, useCache bool) (*ShaderAr
 			}
 			bufferIdx := strings.ToUpper(rPass.Name[len(rPass.Name)-1:])
 
-			bufferInputs, inputsComplete, err := downloadMediaChannels(rPass.Inputs, useCache)
+			bufferInputs, inputsComplete, err := downloadMediaChannels(rPass.Inputs, rPass.Type, useCache)
 			if err != nil {
 				return nil, fmt.Errorf("error processing buffer %s inputs: %w", bufferIdx, err)
 			}

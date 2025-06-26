@@ -22,6 +22,7 @@ type Renderer struct {
 	resolutionLoc         int32
 	timeLoc               int32
 	mouseLoc              int32
+	frameLoc              int32
 	iChannelLoc           [4]int32
 	iChannelResolutionLoc [4]int32
 }
@@ -75,6 +76,7 @@ func (r *Renderer) InitScene(vertexShaderSource, fragmentShaderSource string, un
 	r.resolutionLoc = -1
 	r.timeLoc = -1
 	r.mouseLoc = -1
+	r.frameLoc = -1
 	if v, ok := uniformMap["iResolution"]; ok {
 		r.resolutionLoc = gl.GetUniformLocation(r.shaderProgram, gl.Str(v.MappedName+"\x00"))
 	}
@@ -83,6 +85,9 @@ func (r *Renderer) InitScene(vertexShaderSource, fragmentShaderSource string, un
 	}
 	if v, ok := uniformMap["iMouse"]; ok {
 		r.mouseLoc = gl.GetUniformLocation(r.shaderProgram, gl.Str(v.MappedName+"\x00"))
+	}
+	if v, ok := uniformMap["iFrame"]; ok {
+		r.frameLoc = gl.GetUniformLocation(r.shaderProgram, gl.Str(v.MappedName+"\x00"))
 	}
 
 	// iChannel0 to iChannel3
@@ -121,7 +126,7 @@ func (r *Renderer) Run() {
 
 	var lastMouseClickX, lastMouseClickY float64
 	var mouseWasDown bool
-
+	var frameCount int32 = 0
 	for !r.context.ShouldClose() {
 		currentTime := r.context.Time() - startTime
 		width, height := r.context.GetFramebufferSize()
@@ -135,6 +140,10 @@ func (r *Renderer) Run() {
 		if r.timeLoc != -1 {
 			gl.Uniform1f(r.timeLoc, float32(currentTime))
 		}
+		if r.frameLoc != -1 {
+			gl.Uniform1i(r.frameLoc, frameCount)
+		}
+		frameCount++
 
 		// Update iMouse uniform and prepare data for channels
 		var mouseData [4]float32

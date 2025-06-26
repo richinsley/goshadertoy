@@ -4,6 +4,7 @@ package inputs
 type Uniforms struct {
 	Time  float32
 	Mouse [4]float32
+	Frame int32 // Frame count for animations or effects
 	// Add other uniforms like Date, Frame, etc., as needed.
 }
 
