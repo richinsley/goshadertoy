@@ -22,8 +22,7 @@ type Buffer struct {
 	quadVAO       uint32
 }
 
-// NewBuffer now only creates the OpenGL resources (FBOs and textures)
-// The program and inputs are set later with Finalize().
+// NewBuffer creates the OpenGL resources (FBOs and textures)
 func NewBuffer(index int, width, height int, vao uint32) (*Buffer, error) {
 	b := &Buffer{
 		index:      index,
@@ -67,8 +66,6 @@ func (b *Buffer) Finalize(program uint32, inputs []IChannel) {
 	b.shaderProgram = program
 	b.passInputs = inputs
 }
-
-// ... (Rest of the methods: Bind, Unbind, SwapBuffers, etc., remain the same) ...
 
 // Bind for writing to the current write buffer.
 func (b *Buffer) Bind() {

@@ -43,7 +43,6 @@ func NewCubeMapChannel(index int, images [6]image.Image, sampler api.Sampler) (*
 		rgba := image.NewRGBA(images[i].Bounds())
 		draw.Draw(rgba, rgba.Bounds(), images[i], image.Point{}, draw.Src)
 
-		// --- START: MODIFICATION ---
 		// Flip the image vertically to match OpenGL's coordinate system.
 		bounds := rgba.Bounds()
 		width := int32(bounds.Dx())
@@ -61,7 +60,6 @@ func NewCubeMapChannel(index int, images [6]image.Image, sampler api.Sampler) (*
 
 			copy(dstRow, srcRow)
 		}
-		// --- END: MODIFICATION ---
 
 		gl.TexImage2D(
 			gl.TEXTURE_CUBE_MAP_POSITIVE_X+uint32(i),
@@ -108,30 +106,10 @@ func NewCubeMapChannel(index int, images [6]image.Image, sampler api.Sampler) (*
 }
 
 // --- IChannel Interface Implementation ---
-func (c *CubeMapChannel) GetInputIndex() int {
-	return c.index
-}
-
-func (c *CubeMapChannel) GetCType() string {
-	return c.ctype
-}
-
-func (c *CubeMapChannel) Update(uniforms *Uniforms) {
-	// No-op for static cube maps.
-}
-
-func (c *CubeMapChannel) GetTextureID() uint32 {
-	return c.textureID
-}
-
-func (c *CubeMapChannel) ChannelRes() [3]float32 {
-	return c.resolution
-}
-
-func (c *CubeMapChannel) Destroy() {
-	gl.DeleteTextures(1, &c.textureID)
-}
-
-func (c *CubeMapChannel) GetSamplerType() string {
-	return "samplerCube"
-}
+func (c *CubeMapChannel) GetInputIndex() int        { return c.index }
+func (c *CubeMapChannel) GetCType() string          { return c.ctype }
+func (c *CubeMapChannel) Update(uniforms *Uniforms) { /* No-op for static cube maps. */ }
+func (c *CubeMapChannel) GetTextureID() uint32      { return c.textureID }
+func (c *CubeMapChannel) ChannelRes() [3]float32    { return c.resolution }
+func (c *CubeMapChannel) Destroy()                  { gl.DeleteTextures(1, &c.textureID) }
+func (c *CubeMapChannel) GetSamplerType() string    { return "samplerCube" }

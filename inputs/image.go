@@ -142,30 +142,12 @@ func getFilterMode(filter string) (minFilter, magFilter int32) {
 }
 
 // --- IChannel Interface Implementation ---
-func (c *ImageChannel) GetInputIndex() int {
-	return c.index
-}
-
-func (c *ImageChannel) GetCType() string {
-	return c.ctype
-}
-
-func (c *ImageChannel) Update(uniforms *Uniforms) {
-	// No-op for static images.
-}
-
-func (c *ImageChannel) GetTextureID() uint32 {
-	return c.textureID
-}
-
-func (c *ImageChannel) ChannelRes() [3]float32 {
-	return c.resolution
-}
-
-func (c *ImageChannel) Destroy() {
-	gl.DeleteTextures(1, &c.textureID)
-}
-
+func (c *ImageChannel) GetInputIndex() int        { return c.index }
+func (c *ImageChannel) GetCType() string          { return c.ctype }
+func (c *ImageChannel) Update(uniforms *Uniforms) { /*No-op for static images. */ }
+func (c *ImageChannel) GetTextureID() uint32      { return c.textureID }
+func (c *ImageChannel) ChannelRes() [3]float32    { return c.resolution }
+func (c *ImageChannel) Destroy()                  { gl.DeleteTextures(1, &c.textureID) }
 func (c *ImageChannel) GetSamplerType() string {
 	// All image inputs are currently treated as 2D textures.
 	return "sampler2D"

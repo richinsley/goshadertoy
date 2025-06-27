@@ -9,7 +9,6 @@ import (
 )
 
 // Context is a dedicated package for managing the GLFW window and context.
-// This is the ONLY package in the project that should import glfw.
 type Context struct {
 	window *glfw.Window
 }

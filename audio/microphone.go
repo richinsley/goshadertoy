@@ -7,7 +7,7 @@ import (
 	"github.com/gordonklaus/portaudio"
 )
 
-// Microphone now acts as a pure producer, sending data to a channel.
+// Microphone acts as a pure producer, sending data to a channel.
 type Microphone struct {
 	sampleRate  int
 	stream      *portaudio.Stream
@@ -22,7 +22,7 @@ func NewMicrophone(sampleRate int) (*Microphone, error) {
 	return &Microphone{sampleRate: sampleRate}, nil
 }
 
-// audioCallback now sends data to the channel.
+// audioCallback sends data to the channel.
 func (m *Microphone) audioCallback(in []float32) {
 	// We must copy the input slice, as PortAudio will reuse its buffer.
 	dataCopy := make([]float32, len(in))

@@ -12,7 +12,7 @@ import (
 
 // Renderer encapsulates the OpenGL state for drawing a shader.
 type Renderer struct {
-	// The context is now provided by the dedicated glfwcontext package.
+	// The context is provided by the dedicated glfwcontext package.
 	context       *glfwcontext.Context
 	shaderProgram uint32
 	quadVAO       uint32
@@ -119,7 +119,7 @@ func (r *Renderer) InitScene(vertexShaderSource string, shader *gst.Shader, chan
 	return nil
 }
 
-// Run starts the main render loop. It now handles all standard uniform updates internally.
+// Run starts the main render loop. It handles all standard uniform updates internally.
 func (r *Renderer) Run() {
 	startTime := r.context.Time()
 	win := r.context.Window()

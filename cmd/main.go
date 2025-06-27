@@ -62,6 +62,7 @@ func runShadertoy(shaderArgs *api.ShaderArgs) {
 func init() {
 	runtime.LockOSThread()
 }
+
 func main() {
 	// do this in init() for now
 	// runtime.LockOSThread()

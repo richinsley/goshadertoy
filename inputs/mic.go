@@ -18,7 +18,7 @@ const (
 	historyBufferSize = fftInputSize * 4 // Store more history than needed for one frame
 )
 
-// MicChannel now acts as a consumer of an audio stream.
+// MicChannel acts as a consumer of an audio stream.
 type MicChannel struct {
 	index       int
 	ctype       string
@@ -26,7 +26,7 @@ type MicChannel struct {
 	audioDevice audio.AudioDevice
 
 	// Internal buffer to store recent audio history for FFT processing.
-	// This is now the consumer's responsibility.
+	// This is the consumer's responsibility.
 	historyBuffer []float32
 	bufferPos     int
 	mutex         sync.Mutex
@@ -104,7 +104,7 @@ func (c *MicChannel) getRecentSamples(numSamples int) []float32 {
 	return out
 }
 
-// Update now reads from its own history buffer instead of the device directly.
+// Update reads from its own history buffer instead of the device directly.
 func (c *MicChannel) Update(uniforms *Uniforms) {
 	// Get recent audio samples from our internal history buffer.
 	samples := c.getRecentSamples(fftInputSize)
@@ -138,7 +138,7 @@ func (c *MicChannel) Update(uniforms *Uniforms) {
 	gl.BindTexture(gl.TEXTURE_2D, 0)
 }
 
-// Destroy now just calls Stop() on the device.
+// Destroy just calls Stop() on the device.
 func (c *MicChannel) Destroy() {
 	log.Printf("Destroying MicChannel %d and stopping audio device.", c.index)
 	if c.audioDevice != nil {
