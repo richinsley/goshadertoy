@@ -1,14 +1,19 @@
 package renderer
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
 	"github.com/go-gl/gl/v4.1-core/gl"
+	api "github.com/richinsley/goshadertoy/api"
 	"github.com/richinsley/goshadertoy/glfwcontext"
 	inputs "github.com/richinsley/goshadertoy/inputs"
+	shader "github.com/richinsley/goshadertoy/shader"
 	gst "github.com/richinsley/goshadertranslator"
 )
+
+var translator *gst.ShaderTranslator
 
 // Renderer encapsulates the OpenGL state for drawing a shader.
 type Renderer struct {
@@ -62,14 +67,42 @@ var quadVertices = []float32{
 }
 
 // InitScene compiles shaders and sets up vertex data.
-func (r *Renderer) InitScene(vertexShaderSource string, shader *gst.Shader, channels []inputs.IChannel) error {
+// func (r *Renderer) InitScene(vertexShaderSource string, shader *gst.Shader, channels []inputs.IChannel) error {
+func (r *Renderer) InitScene(shaderArgs *api.ShaderArgs) error {
+	// see if we need a translator
 	var err error
-	r.shaderProgram, err = newProgram(vertexShaderSource, shader.Code)
+	if translator == nil {
+		ctx := context.Background()
+		translator, err = gst.NewShaderTranslator(ctx)
+		if err != nil {
+			return err
+		}
+	}
+
+	// Create IChannel objects from shader arguments
+	channels, err := inputs.GetChannels(shaderArgs)
+	if err != nil {
+		return fmt.Errorf("failed to create channels: %w", err)
+	}
+
+	// Generate the full fragment shader source
+	fullFragmentSource := shader.GetFragmentShader(channels, shaderArgs.CommonCode, shaderArgs.ShaderCode)
+
+	// translate the shader to GLSL
+	fsShader, err := translator.TranslateShader(fullFragmentSource, "fragment", gst.ShaderSpecWebGL2, gst.OutputFormatGLSL330)
+	if err != nil {
+		return fmt.Errorf("fragment shader translation failed: %w", err)
+	}
+
+	// get th standard vertex shader source
+	vertexShaderSource := shader.GenerateVertexShader()
+
+	r.shaderProgram, err = newProgram(vertexShaderSource, fsShader.Code)
 	if err != nil {
 		return fmt.Errorf("failed to create shader program: %w", err)
 	}
 	r.channels = channels // Store channels
-	uniformMap := shader.Variables
+	uniformMap := fsShader.Variables
 	gl.UseProgram(r.shaderProgram)
 
 	// Query uniform locations using the mapped names from the translator.

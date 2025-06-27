@@ -176,7 +176,7 @@ type ShadertoyChannel struct {
 	Data      image.Image    // For textures
 	Volume    *VolumeData    // For 3D volume textures
 	CubeData  [6]image.Image // For cubemaps
-	BufferRef int            // For buffer references ('0-A', '1-B', '2-C', '3-D')
+	BufferRef string         // Buffer name that will be attached to this input channel
 }
 
 // BufferRenderPass represents a processed buffer pass.
@@ -191,10 +191,12 @@ type ShaderArgs struct {
 	ShaderCode string
 	CommonCode string
 	Inputs     []*ShadertoyChannel
-	Buffers    []*BufferRenderPass
+	Buffers    map[string]*BufferRenderPass
 	Title      string
 	Complete   bool
 }
+
+type ShaderPasses map[string]*ShaderArgs
 
 // getAPIKey retrieves the Shadertoy API key from the environment and validates it.
 func getAPIKey() (string, error) {
@@ -353,7 +355,19 @@ func downloadMediaChannels(inputs []Input, passType string, useCache bool) ([]*S
 				log.Printf("invalid buffer reference in src: %s", inp.Src)
 				complete = false
 			} else {
-				channel.BufferRef = num
+				switch num {
+				case 0:
+					channel.BufferRef = "A"
+				case 1:
+					channel.BufferRef = "B"
+				case 2:
+					channel.BufferRef = "C"
+				case 3:
+					channel.BufferRef = "D"
+				default:
+					log.Printf("invalid buffer reference in src: %s", inp.Src)
+					complete = false
+				}
 			}
 		case "volume":
 			mediaURL := shadertoyMediaURL + inp.Src
@@ -635,7 +649,7 @@ func ShaderFromID(apikey string, idOrURL string, useCache bool) (*ShadertoyRespo
 func ShaderArgsFromJSON(shaderData *ShadertoyResponse, useCache bool) (*ShaderArgs, error) {
 	args := &ShaderArgs{
 		Inputs:   make([]*ShadertoyChannel, 4),
-		Buffers:  []*BufferRenderPass{},
+		Buffers:  map[string]*BufferRenderPass{},
 		Complete: true,
 	}
 
@@ -677,7 +691,7 @@ func ShaderArgsFromJSON(shaderData *ShadertoyResponse, useCache bool) (*ShaderAr
 				Inputs:    bufferInputs,
 				BufferIdx: bufferIdx,
 			}
-			args.Buffers = append(args.Buffers, bufferPass)
+			args.Buffers[bufferIdx] = bufferPass
 
 		default:
 			log.Printf("Warning: unsupported render pass type: %s", rPass.Type)

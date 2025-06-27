@@ -6,28 +6,33 @@ import (
 	"github.com/go-gl/gl/v4.1-core/gl"
 )
 
-// Buffer manages two sets of FBOs and textures for double-buffering.  One is the current write target,
-// and the other is the read target. It allows for rendering to one texture while reading from another.
-// There are instances where a render pass for a buffer will self-reference, meaning it reads from its own output.
+// Buffer manages two sets of FBOs and textures for double-buffering.
+// This allows for effects where a shader pass reads from the output of the previous frame.
 type Buffer struct {
-	index         int
-	ctype         string
-	fbo           [2]uint32
-	textureID     [2]uint32
-	readIndex     int // 0 or 1
-	writeIndex    int // 1 or 0
-	resolution    [3]float32
-	shaderProgram uint32
-	passInputs    []IChannel
-	quadVAO       uint32
+	index int
+	ctype string
+
+	// Double-buffering resources
+	fbo        [2]uint32
+	textureID  [2]uint32
+	readIndex  int // Index of the texture to be read from (the result of the previous frame)
+	writeIndex int // Index of the FBO to write to (the current frame)
+
+	resolution [3]float32
+
+	// Render pass specific state that will be set by the renderer
+	ShaderProgram uint32
+	PassInputs    []IChannel
+	QuadVAO       uint32
 }
 
-// NewBuffer creates the OpenGL resources (FBOs and textures)
+// NewBuffer creates the necessary OpenGL resources for a render buffer.
+// It initializes two framebuffers and two textures for double buffering.
 func NewBuffer(index int, width, height int, vao uint32) (*Buffer, error) {
 	b := &Buffer{
 		index:      index,
 		ctype:      "buffer",
-		quadVAO:    vao,
+		QuadVAO:    vao,
 		readIndex:  0,
 		writeIndex: 1,
 	}
@@ -36,6 +41,7 @@ func NewBuffer(index int, width, height int, vao uint32) (*Buffer, error) {
 		var fbo, texture uint32
 		gl.GenTextures(1, &texture)
 		gl.BindTexture(gl.TEXTURE_2D, texture)
+		// Use a floating-point texture format to allow for high dynamic range rendering.
 		gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, int32(width), int32(height), 0, gl.RGBA, gl.FLOAT, nil)
 		gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
 		gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
@@ -44,6 +50,7 @@ func NewBuffer(index int, width, height int, vao uint32) (*Buffer, error) {
 
 		gl.GenFramebuffers(1, &fbo)
 		gl.BindFramebuffer(gl.FRAMEBUFFER, fbo)
+		// Attach the texture to the FBO
 		gl.FramebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0)
 
 		if gl.CheckFramebufferStatus(gl.FRAMEBUFFER) != gl.FRAMEBUFFER_COMPLETE {
@@ -54,6 +61,7 @@ func NewBuffer(index int, width, height int, vao uint32) (*Buffer, error) {
 		b.textureID[i] = texture
 	}
 
+	// Unbind to avoid accidental modifications
 	gl.BindFramebuffer(gl.FRAMEBUFFER, 0)
 	gl.BindTexture(gl.TEXTURE_2D, 0)
 
@@ -61,27 +69,22 @@ func NewBuffer(index int, width, height int, vao uint32) (*Buffer, error) {
 	return b, nil
 }
 
-// Finalize sets the shader program and inputs for the buffer pass.
-func (b *Buffer) Finalize(program uint32, inputs []IChannel) {
-	b.shaderProgram = program
-	b.passInputs = inputs
-}
-
-// Bind for writing to the current write buffer.
-func (b *Buffer) Bind() {
+// BindForWriting binds the current write-target FBO.
+func (b *Buffer) BindForWriting() {
 	gl.BindFramebuffer(gl.FRAMEBUFFER, b.fbo[b.writeIndex])
 }
 
-func (b *Buffer) Unbind() {
+// UnbindForWriting unbinds the FBO.
+func (b *Buffer) UnbindForWriting() {
 	gl.BindFramebuffer(gl.FRAMEBUFFER, 0)
 }
 
-// SwapBuffers toggles the read/write indices.
+// SwapBuffers toggles the read/write indices. This is called after the buffer has been rendered to.
 func (b *Buffer) SwapBuffers() {
 	b.readIndex, b.writeIndex = b.writeIndex, b.readIndex
 }
 
-// GetTextureID returns the ID of the texture that should be read from.
+// GetTextureID returns the ID of the texture that should be read from (the result of the previous frame).
 func (b *Buffer) GetTextureID() uint32 {
 	return b.textureID[b.readIndex]
 }
@@ -99,25 +102,13 @@ func (b *Buffer) Resize(width, height int) {
 // --- IChannel Interface Implementation ---
 func (b *Buffer) GetInputIndex() int        { return b.index }
 func (b *Buffer) GetCType() string          { return b.ctype }
-func (b *Buffer) Update(uniforms *Uniforms) { /* Implemented in renderer */ }
+func (b *Buffer) Update(uniforms *Uniforms) { /* The renderer will handle updating buffers */ }
 func (b *Buffer) ChannelRes() [3]float32    { return b.resolution }
 func (b *Buffer) GetSamplerType() string    { return "sampler2D" }
 func (b *Buffer) Destroy() {
 	gl.DeleteFramebuffers(2, &b.fbo[0])
 	gl.DeleteTextures(2, &b.textureID[0])
-	if b.shaderProgram != 0 {
-		gl.DeleteProgram(b.shaderProgram)
+	if b.ShaderProgram != 0 {
+		gl.DeleteProgram(b.ShaderProgram)
 	}
-}
-
-// --- Accessor Methods ---
-
-// GetShaderProgram returns the shader program associated with this buffer pass.
-func (b *Buffer) GetShaderProgram() uint32 {
-	return b.shaderProgram
-}
-
-// GetPassInputs returns the slice of IChannel inputs for this buffer pass.
-func (b *Buffer) GetPassInputs() []IChannel {
-	return b.passInputs
 }

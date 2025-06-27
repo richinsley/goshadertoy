@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -9,10 +8,7 @@ import (
 	"runtime"
 
 	api "github.com/richinsley/goshadertoy/api"
-	inputs "github.com/richinsley/goshadertoy/inputs"
 	renderer "github.com/richinsley/goshadertoy/renderer"
-	shader "github.com/richinsley/goshadertoy/shader"
-	gst "github.com/richinsley/goshadertranslator"
 )
 
 func runShadertoy(shaderArgs *api.ShaderArgs) {
@@ -23,33 +19,8 @@ func runShadertoy(shaderArgs *api.ShaderArgs) {
 	}
 	defer r.Shutdown()
 
-	// Create IChannel objects from shader arguments
-	channels, err := inputs.GetChannels(shaderArgs)
-	if err != nil {
-		log.Fatalf("Failed to create channels: %v", err)
-	}
-
-	// Translate the shader
-	log.Println("--- Translating Fragment Shader ---")
-	ctx := context.Background()
-	translator, err := gst.NewShaderTranslator(ctx)
-	if err != nil {
-		log.Fatalf("Failed to create shader translator: %v", err)
-	}
-	defer translator.Close()
-
-	// Generate the full fragment shader source
-	fullFragmentSource := shader.GetFragmentShader(channels, shaderArgs.CommonCode, shaderArgs.ShaderCode)
-
-	fsShader, err := translator.TranslateShader(fullFragmentSource, "fragment", gst.ShaderSpecWebGL2, gst.OutputFormatGLSL330)
-	if err != nil {
-		log.Fatalf("Fragment shader translation failed: %v", err)
-	}
-
-	log.Println("Fragment shader translated successfully.")
-
 	// Initialize the scene with shaders and channels
-	err = r.InitScene(shader.GenerateVertexShader(), fsShader, channels)
+	err = r.InitScene(shaderArgs)
 	if err != nil {
 		log.Fatalf("Failed to initialize scene: %v", err)
 	}
