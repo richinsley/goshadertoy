@@ -6,7 +6,7 @@ import (
 	api "github.com/richinsley/goshadertoy/api"
 )
 
-func GetChannels(shaderInputs []*api.ShadertoyChannel) ([]IChannel, error) {
+func GetChannels(shaderInputs []*api.ShadertoyChannel, width, height int, vao uint32, buffers map[string]*Buffer) ([]IChannel, error) {
 	// Create IChannel objects from shader arguments
 	channels := make([]IChannel, 4)
 	for i, chInput := range shaderInputs {
@@ -63,7 +63,13 @@ func GetChannels(shaderInputs []*api.ShadertoyChannel) ([]IChannel, error) {
 			channels[chInput.Channel] = cubeChannel
 			log.Printf("Initialized CubeMapChannel %d.", chInput.Channel)
 		case "buffer":
-			log.Printf("Warning: Buffer inputs are not yet supported (Channel %d).", i)
+			// Look up the buffer in the provided map
+			buffer, ok := buffers[chInput.BufferRef]
+			if !ok {
+				log.Fatalf("Buffer %s not found for channel %d", chInput.BufferRef, channelIndex)
+			}
+			channels[channelIndex] = buffer
+			log.Printf("Assigned Buffer %s to Channel %d.", chInput.BufferRef, i)
 		case "mic":
 			newChannel, err := NewMicChannel(chInput.Channel)
 			if err != nil {

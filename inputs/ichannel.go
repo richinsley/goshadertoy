@@ -10,9 +10,6 @@ type Uniforms struct {
 
 // IChannel defines the contract for any Shadertoy input channel (iChannel0-3).
 type IChannel interface {
-	// GetInputIndex return the index of the input (0-n)
-	GetInputIndex() int
-
 	// GetCType return the ctype of the input
 	GetCType() string
 
