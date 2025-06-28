@@ -6,10 +6,10 @@ import (
 	api "github.com/richinsley/goshadertoy/api"
 )
 
-func GetChannels(shaderArgs *api.ShaderArgs) ([]IChannel, error) {
+func GetChannels(shaderInputs []*api.ShadertoyChannel) ([]IChannel, error) {
 	// Create IChannel objects from shader arguments
 	channels := make([]IChannel, 4)
-	for i, chInput := range shaderArgs.Inputs {
+	for i, chInput := range shaderInputs {
 		if chInput == nil {
 			continue
 		}
