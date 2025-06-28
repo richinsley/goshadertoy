@@ -184,16 +184,17 @@ type BufferRenderPass struct {
 	Code      string
 	Inputs    []*ShadertoyChannel
 	BufferIdx string
+	Name      string
 }
 
 // ShaderArgs holds the final, processed arguments for a Shadertoy implementation.
 type ShaderArgs struct {
-	ShaderCode string
+	// ShaderCode string
 	CommonCode string
-	Inputs     []*ShadertoyChannel
-	Buffers    map[string]*BufferRenderPass
-	Title      string
-	Complete   bool
+	// Inputs     []*ShadertoyChannel
+	Buffers  map[string]*BufferRenderPass
+	Title    string
+	Complete bool
 }
 
 type ShaderPasses map[string]*ShaderArgs
@@ -648,7 +649,7 @@ func ShaderFromID(apikey string, idOrURL string, useCache bool) (*ShadertoyRespo
 // ShaderArgsFromJSON builds the final ShaderArgs from the raw API response.
 func ShaderArgsFromJSON(shaderData *ShadertoyResponse, useCache bool) (*ShaderArgs, error) {
 	args := &ShaderArgs{
-		Inputs:   make([]*ShadertoyChannel, 4),
+		// Inputs:   make([]*ShadertoyChannel, 4),
 		Buffers:  map[string]*BufferRenderPass{},
 		Complete: true,
 	}
@@ -659,18 +660,35 @@ func ShaderArgsFromJSON(shaderData *ShadertoyResponse, useCache bool) (*ShaderAr
 
 	var inputsComplete bool
 	var err error
+	var bufferInputs []*ShadertoyChannel
 
 	for _, rPass := range shaderData.Shader.RenderPass {
 		switch rPass.Type {
 		case "image":
-			args.ShaderCode = rPass.Code
-			if len(rPass.Inputs) > 0 {
-				args.Inputs, inputsComplete, err = downloadMediaChannels(rPass.Inputs, rPass.Type, useCache)
-				if err != nil {
-					return nil, fmt.Errorf("error processing image pass inputs: %w", err)
+			/*
+				args.ShaderCode = rPass.Code
+				if len(rPass.Inputs) > 0 {
+					args.Inputs, inputsComplete, err = downloadMediaChannels(rPass.Inputs, rPass.Type, useCache)
+					if err != nil {
+						return nil, fmt.Errorf("error processing image pass inputs: %w", err)
+					}
+					args.Complete = args.Complete && inputsComplete
 				}
-				args.Complete = args.Complete && inputsComplete
+			*/
+			bufferIdx := "image" // Use a special index for the image pass
+
+			bufferInputs, inputsComplete, err = downloadMediaChannels(rPass.Inputs, rPass.Type, useCache)
+			if err != nil {
+				return nil, fmt.Errorf("error processing buffer %s inputs: %w", bufferIdx, err)
 			}
+			args.Complete = args.Complete && inputsComplete
+
+			bufferPass := &BufferRenderPass{
+				Code:      rPass.Code,
+				Inputs:    bufferInputs,
+				BufferIdx: bufferIdx,
+			}
+			args.Buffers[bufferIdx] = bufferPass
 		case "common":
 			args.CommonCode = rPass.Code
 		case "buffer":
@@ -680,7 +698,7 @@ func ShaderArgsFromJSON(shaderData *ShadertoyResponse, useCache bool) (*ShaderAr
 			}
 			bufferIdx := strings.ToUpper(rPass.Name[len(rPass.Name)-1:])
 
-			bufferInputs, inputsComplete, err := downloadMediaChannels(rPass.Inputs, rPass.Type, useCache)
+			bufferInputs, inputsComplete, err = downloadMediaChannels(rPass.Inputs, rPass.Type, useCache)
 			if err != nil {
 				return nil, fmt.Errorf("error processing buffer %s inputs: %w", bufferIdx, err)
 			}

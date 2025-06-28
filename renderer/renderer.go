@@ -31,9 +31,9 @@ type RenderPass struct {
 // Renderer encapsulates the OpenGL state for drawing a shader.
 type Renderer struct {
 	// The context is provided by the dedicated glfwcontext package.
-	context      *glfwcontext.Context
-	quadVAO      uint32
-	imagePass    *RenderPass
+	context *glfwcontext.Context
+	quadVAO uint32
+	// imagePass    *RenderPass
 	bufferPasses []*RenderPass          // ordered list of buffer render passes
 	namedPasses  map[string]*RenderPass // named render passes for easy access
 }
@@ -43,12 +43,11 @@ func NewRenderer() (*Renderer, error) {
 	r := &Renderer{}
 	var err error
 
-	r.imagePass = &RenderPass{}
 	r.namedPasses = make(map[string]*RenderPass)
 	r.bufferPasses = make([]*RenderPass, 0)
 
 	// automatically add the image pass to the named passes
-	r.namedPasses["image"] = r.imagePass
+	r.namedPasses["image"] = &RenderPass{}
 
 	// We now instantiate the context from the new package.
 	r.context, err = glfwcontext.NewContext()
@@ -81,6 +80,85 @@ var quadVertices = []float32{
 	-1.0, 1.0, 1.0, -1.0, 1.0, 1.0,
 }
 
+func (r *Renderer) GetRenderPass(name string, shaderArgs *api.ShaderArgs) (*RenderPass, error) {
+
+	// Create a new RenderPass if it doesn't exist
+	if name == "" {
+		name = "image" // Default to image pass
+	}
+
+	var pass *api.BufferRenderPass
+	var exists bool
+	if pass, exists = shaderArgs.Buffers[name]; !exists {
+		return nil, fmt.Errorf("no render pass found with name: %s", name)
+	}
+
+	// Create IChannel objects from shader arguments
+	channels, err := inputs.GetChannels(pass.Inputs)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create channels: %w", err)
+	}
+
+	// Generate the full fragment shader source
+	fullFragmentSource := shader.GetFragmentShader(channels, shaderArgs.CommonCode, pass.Code)
+
+	// translate the shader to GLSL
+	fsShader, err := translator.TranslateShader(fullFragmentSource, "fragment", gst.ShaderSpecWebGL2, gst.OutputFormatGLSL330)
+	if err != nil {
+		return nil, fmt.Errorf("fragment shader translation failed: %w", err)
+	}
+
+	retv := &RenderPass{
+		shaderProgram: 0,
+		channels:      channels,
+	}
+
+	// get the standard vertex shader source
+	vertexShaderSource := shader.GenerateVertexShader()
+
+	retv.shaderProgram, err = newProgram(vertexShaderSource, fsShader.Code)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create shader program: %w", err)
+	}
+	retv.channels = channels // Store channels
+	uniformMap := fsShader.Variables
+	gl.UseProgram(retv.shaderProgram)
+
+	// Query uniform locations using the mapped names from the translator.
+	retv.resolutionLoc = -1
+	retv.timeLoc = -1
+	retv.mouseLoc = -1
+	retv.frameLoc = -1
+	if v, ok := uniformMap["iResolution"]; ok {
+		retv.resolutionLoc = gl.GetUniformLocation(retv.shaderProgram, gl.Str(v.MappedName+"\x00"))
+	}
+	if v, ok := uniformMap["iTime"]; ok {
+		retv.timeLoc = gl.GetUniformLocation(retv.shaderProgram, gl.Str(v.MappedName+"\x00"))
+	}
+	if v, ok := uniformMap["iMouse"]; ok {
+		retv.mouseLoc = gl.GetUniformLocation(retv.shaderProgram, gl.Str(v.MappedName+"\x00"))
+	}
+	if v, ok := uniformMap["iFrame"]; ok {
+		retv.frameLoc = gl.GetUniformLocation(retv.shaderProgram, gl.Str(v.MappedName+"\x00"))
+	}
+
+	// iChannel0 to iChannel3
+	for i := 0; i < 4; i++ {
+		samplerName := fmt.Sprintf("iChannel%d", i)
+		resolutionName := fmt.Sprintf("iChannelResolution[%d]", i)
+		retv.iChannelLoc[i] = -1
+		retv.iChannelResolutionLoc[i] = -1
+		if v, ok := uniformMap[samplerName]; ok {
+			retv.iChannelLoc[i] = gl.GetUniformLocation(retv.shaderProgram, gl.Str(v.MappedName+"\x00"))
+		}
+		if v, ok := uniformMap[resolutionName]; ok {
+			retv.iChannelResolutionLoc[i] = gl.GetUniformLocation(retv.shaderProgram, gl.Str(v.MappedName+"\x00"))
+		}
+	}
+
+	return retv, nil
+}
+
 // InitScene compiles shaders and sets up vertex data.
 // func (r *Renderer) InitScene(vertexShaderSource string, shader *gst.Shader, channels []inputs.IChannel) error {
 func (r *Renderer) InitScene(shaderArgs *api.ShaderArgs) error {
@@ -94,61 +172,16 @@ func (r *Renderer) InitScene(shaderArgs *api.ShaderArgs) error {
 		}
 	}
 
-	// Create IChannel objects from shader arguments
-	channels, err := inputs.GetChannels(shaderArgs.Inputs)
-	if err != nil {
-		return fmt.Errorf("failed to create channels: %w", err)
-	}
-
-	// Generate the full fragment shader source
-	fullFragmentSource := shader.GetFragmentShader(channels, shaderArgs.CommonCode, shaderArgs.ShaderCode)
-
-	// translate the shader to GLSL
-	fsShader, err := translator.TranslateShader(fullFragmentSource, "fragment", gst.ShaderSpecWebGL2, gst.OutputFormatGLSL330)
-	if err != nil {
-		return fmt.Errorf("fragment shader translation failed: %w", err)
-	}
-
-	// get th standard vertex shader source
-	vertexShaderSource := shader.GenerateVertexShader()
-
-	r.imagePass.shaderProgram, err = newProgram(vertexShaderSource, fsShader.Code)
-	if err != nil {
-		return fmt.Errorf("failed to create shader program: %w", err)
-	}
-	r.imagePass.channels = channels // Store channels
-	uniformMap := fsShader.Variables
-	gl.UseProgram(r.imagePass.shaderProgram)
-
-	// Query uniform locations using the mapped names from the translator.
-	r.imagePass.resolutionLoc = -1
-	r.imagePass.timeLoc = -1
-	r.imagePass.mouseLoc = -1
-	r.imagePass.frameLoc = -1
-	if v, ok := uniformMap["iResolution"]; ok {
-		r.imagePass.resolutionLoc = gl.GetUniformLocation(r.imagePass.shaderProgram, gl.Str(v.MappedName+"\x00"))
-	}
-	if v, ok := uniformMap["iTime"]; ok {
-		r.imagePass.timeLoc = gl.GetUniformLocation(r.imagePass.shaderProgram, gl.Str(v.MappedName+"\x00"))
-	}
-	if v, ok := uniformMap["iMouse"]; ok {
-		r.imagePass.mouseLoc = gl.GetUniformLocation(r.imagePass.shaderProgram, gl.Str(v.MappedName+"\x00"))
-	}
-	if v, ok := uniformMap["iFrame"]; ok {
-		r.imagePass.frameLoc = gl.GetUniformLocation(r.imagePass.shaderProgram, gl.Str(v.MappedName+"\x00"))
-	}
-
-	// iChannel0 to iChannel3
-	for i := 0; i < 4; i++ {
-		samplerName := fmt.Sprintf("iChannel%d", i)
-		resolutionName := fmt.Sprintf("iChannelResolution[%d]", i)
-		r.imagePass.iChannelLoc[i] = -1
-		r.imagePass.iChannelResolutionLoc[i] = -1
-		if v, ok := uniformMap[samplerName]; ok {
-			r.imagePass.iChannelLoc[i] = gl.GetUniformLocation(r.imagePass.shaderProgram, gl.Str(v.MappedName+"\x00"))
+	// Create the image pass and any buffer passes.
+	passnames := []string{"image", "A", "B", "C", "D"}
+	for _, name := range passnames {
+		pass, err := r.GetRenderPass(name, shaderArgs)
+		if err != nil {
+			continue
 		}
-		if v, ok := uniformMap[resolutionName]; ok {
-			r.imagePass.iChannelResolutionLoc[i] = gl.GetUniformLocation(r.imagePass.shaderProgram, gl.Str(v.MappedName+"\x00"))
+		r.namedPasses[name] = pass
+		if name != "image" {
+			r.bufferPasses = append(r.bufferPasses, pass)
 		}
 	}
 
@@ -175,27 +208,28 @@ func (r *Renderer) Run() {
 	var lastMouseClickX, lastMouseClickY float64
 	var mouseWasDown bool
 	var frameCount int32 = 0
+	imagePass := r.namedPasses["image"]
 	for !r.context.ShouldClose() {
 		currentTime := r.context.Time() - startTime
 		width, height := r.context.GetFramebufferSize()
 
-		gl.UseProgram(r.imagePass.shaderProgram)
+		gl.UseProgram(imagePass.shaderProgram)
 
 		// Update standard uniforms
-		if r.imagePass.resolutionLoc != -1 {
-			gl.Uniform3f(r.imagePass.resolutionLoc, float32(width), float32(height), 0)
+		if imagePass.resolutionLoc != -1 {
+			gl.Uniform3f(imagePass.resolutionLoc, float32(width), float32(height), 0)
 		}
-		if r.imagePass.timeLoc != -1 {
-			gl.Uniform1f(r.imagePass.timeLoc, float32(currentTime))
+		if imagePass.timeLoc != -1 {
+			gl.Uniform1f(imagePass.timeLoc, float32(currentTime))
 		}
-		if r.imagePass.frameLoc != -1 {
-			gl.Uniform1i(r.imagePass.frameLoc, frameCount)
+		if imagePass.frameLoc != -1 {
+			gl.Uniform1i(imagePass.frameLoc, frameCount)
 		}
 		frameCount++
 
 		// Update iMouse uniform and prepare data for channels
 		var mouseData [4]float32
-		if r.imagePass.mouseLoc != -1 && win != nil {
+		if imagePass.mouseLoc != -1 && win != nil {
 			x, y := win.GetCursorPos()
 			mouseX := float32(x)
 			mouseY := float32(height) - float32(y) // Flip Y
@@ -216,7 +250,7 @@ func (r *Renderer) Run() {
 				clickY = -clickY
 			}
 			mouseData = [4]float32{mouseX, mouseY, clickX, clickY}
-			gl.Uniform4f(r.imagePass.mouseLoc, mouseData[0], mouseData[1], mouseData[2], mouseData[3])
+			gl.Uniform4f(imagePass.mouseLoc, mouseData[0], mouseData[1], mouseData[2], mouseData[3])
 		}
 
 		// Update and bind input channels
@@ -225,7 +259,7 @@ func (r *Renderer) Run() {
 			Mouse: mouseData,
 		}
 
-		for _, ch := range r.imagePass.channels {
+		for _, ch := range imagePass.channels {
 			if ch == nil {
 				continue
 			}
@@ -244,16 +278,16 @@ func (r *Renderer) Run() {
 				texTarget = gl.TEXTURE_2D
 			}
 
-			if r.imagePass.iChannelLoc[chIndex] != -1 {
+			if imagePass.iChannelLoc[chIndex] != -1 {
 				gl.ActiveTexture(gl.TEXTURE0 + uint32(chIndex))
 				gl.BindTexture(texTarget, ch.GetTextureID())
-				gl.Uniform1i(r.imagePass.iChannelLoc[chIndex], int32(chIndex))
+				gl.Uniform1i(imagePass.iChannelLoc[chIndex], int32(chIndex))
 			}
 
 			// Set resolution uniform
-			if r.imagePass.iChannelResolutionLoc[chIndex] != -1 {
+			if imagePass.iChannelResolutionLoc[chIndex] != -1 {
 				res := ch.ChannelRes()
-				gl.Uniform3fv(r.imagePass.iChannelResolutionLoc[chIndex], 1, &res[0])
+				gl.Uniform3fv(imagePass.iChannelResolutionLoc[chIndex], 1, &res[0])
 			}
 		}
 
@@ -265,7 +299,7 @@ func (r *Renderer) Run() {
 		gl.BindVertexArray(0)
 
 		// Unbind textures
-		for _, ch := range r.imagePass.channels {
+		for _, ch := range imagePass.channels {
 			if ch != nil {
 				var texTarget uint32
 				switch ch.GetSamplerType() {
