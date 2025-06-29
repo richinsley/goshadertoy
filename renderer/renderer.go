@@ -230,42 +230,70 @@ func (r *Renderer) Run() {
 
 	for !r.context.ShouldClose() {
 		currentTime := r.context.Time() - startTime
-		width, height := r.context.GetFramebufferSize()
+		// Get the framebuffer size in actual pixels. This is used for iResolution.
+		fbWidth, fbHeight := r.context.GetFramebufferSize()
 
 		// If the window size has changed, resize the buffers.
-		if width != lastWidth || height != lastHeight {
+		if fbWidth != lastWidth || fbHeight != lastHeight {
 			for _, buffer := range r.buffers {
-				buffer.Resize(width, height)
+				buffer.Resize(fbWidth, fbHeight)
 			}
-			lastWidth, lastHeight = width, height
+			lastWidth, lastHeight = fbWidth, fbHeight
 		}
 
 		// Prepare uniform data that is common to all passes
 		var mouseData [4]float32
 		if win != nil {
-			x, y := win.GetCursorPos()
-			mouseX := float32(x)
-			mouseY := float32(height) - float32(y) // Flip Y
+			// Get window size in screen coordinates (logical pixels).
+			winWidth, winHeight := win.GetSize()
+
+			// Calculate DPI scaling factor. This is crucial for high-DPI displays
+			// where window coordinates and framebuffer pixels don't match.
+			var scaleX, scaleY float64 = 1.0, 1.0
+			if winWidth > 0 && winHeight > 0 {
+				scaleX = float64(fbWidth) / float64(winWidth)
+				scaleY = float64(fbHeight) / float64(winHeight)
+			}
+
+			// Get cursor position in screen coordinates.
+			cursorX, cursorY := win.GetCursorPos()
+
+			// Scale cursor coordinates to framebuffer pixel coordinates.
+			pixelX := cursorX * scaleX
+			pixelY := cursorY * scaleY // Y is still from top-left here
+
+			// Calculate mouseX and mouseY for the shader in pixel coordinates.
+			mouseX := float32(pixelX)
+			mouseY := float32(fbHeight) - float32(pixelY) // Flip Y for OpenGL coordinates
+
 			const mouseLeft = 0
 			isMouseDown := win.GetMouseButton(mouseLeft) == 1 // 1 is glfw.Press
+
 			if isMouseDown && !mouseWasDown {
-				lastMouseClickX, lastMouseClickY = x, y
+				// Store the click position in scaled pixel coordinates.
+				lastMouseClickX = pixelX
+				lastMouseClickY = pixelY
 			}
 			mouseWasDown = isMouseDown
+
+			// Calculate clickX and clickY for the shader.
 			clickX := float32(lastMouseClickX)
-			clickY := float32(height) - float32(lastMouseClickY) // Flip Y
+			clickY := float32(fbHeight) - float32(lastMouseClickY) // Flip Y for OpenGL
+
 			if !isMouseDown {
-				// Shadertoy negates z/w when the mouse button is up
+				// Shadertoy negates z/w when the mouse button is up.
 				clickX = -clickX
 				clickY = -clickY
 			}
 			mouseData = [4]float32{mouseX, mouseY, clickX, clickY}
 		}
+
 		uniforms := &inputs.Uniforms{
 			Time:  float32(currentTime),
 			Mouse: mouseData,
 			Frame: frameCount,
 		}
+
 		// Render buffer passes
 		for _, pass := range r.bufferPasses {
 			if pass.buffer != nil {
@@ -273,9 +301,9 @@ func (r *Renderer) Run() {
 			}
 
 			gl.UseProgram(pass.shaderProgram)
-			updateUniforms(pass, width, height, uniforms)
+			updateUniforms(pass, fbWidth, fbHeight, uniforms)
 			bindChannels(pass, uniforms)
-			gl.Viewport(0, 0, int32(width), int32(height))
+			gl.Viewport(0, 0, int32(fbWidth), int32(fbHeight))
 			gl.Clear(gl.COLOR_BUFFER_BIT)
 			gl.BindVertexArray(r.quadVAO)
 			gl.DrawArrays(gl.TRIANGLES, 0, 6)
@@ -286,12 +314,13 @@ func (r *Renderer) Run() {
 				pass.buffer.SwapBuffers()
 			}
 		}
+
 		// Render the final image pass to the screen
 		imagePass := r.namedPasses["image"]
 		gl.UseProgram(imagePass.shaderProgram)
-		updateUniforms(imagePass, width, height, uniforms)
+		updateUniforms(imagePass, fbWidth, fbHeight, uniforms)
 		bindChannels(imagePass, uniforms)
-		gl.Viewport(0, 0, int32(width), int32(height))
+		gl.Viewport(0, 0, int32(fbWidth), int32(fbHeight))
 		gl.Clear(gl.COLOR_BUFFER_BIT)
 		gl.BindVertexArray(r.quadVAO)
 		gl.DrawArrays(gl.TRIANGLES, 0, 6)
@@ -300,6 +329,7 @@ func (r *Renderer) Run() {
 		frameCount++
 	}
 }
+
 func updateUniforms(pass *RenderPass, width, height int, uniforms *inputs.Uniforms) {
 	if pass.resolutionLoc != -1 {
 		gl.Uniform3f(pass.resolutionLoc, float32(width), float32(height), 0)
