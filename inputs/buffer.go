@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/go-gl/gl/v4.1-core/gl"
+	api "github.com/richinsley/goshadertoy/api"
 )
 
 // Buffer manages two sets of FBOs and textures for double-buffering.
@@ -23,6 +24,8 @@ type Buffer struct {
 	ShaderProgram uint32
 	PassInputs    []IChannel
 	QuadVAO       uint32
+	wrap          string
+	filter        string
 }
 
 // NewBuffer creates the necessary OpenGL resources for a render buffer.
@@ -33,6 +36,8 @@ func NewBuffer(width, height int, vao uint32) (*Buffer, error) {
 		QuadVAO:    vao,
 		readIndex:  0,
 		writeIndex: 1,
+		wrap:       "clamp",
+		filter:     "linear",
 	}
 
 	for i := 0; i < 2; i++ {
@@ -41,6 +46,7 @@ func NewBuffer(width, height int, vao uint32) (*Buffer, error) {
 		gl.BindTexture(gl.TEXTURE_2D, texture)
 		// Use a floating-point texture format to allow for high dynamic range rendering.
 		gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, int32(width), int32(height), 0, gl.RGBA, gl.FLOAT, nil)
+
 		gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
 		gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
 		gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
@@ -100,6 +106,25 @@ func (b *Buffer) Resize(width, height int) {
 		gl.BindTexture(gl.TEXTURE_2D, b.textureID[i])
 		gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, int32(width), int32(height), 0, gl.RGBA, gl.FLOAT, nil)
 	}
+	gl.BindTexture(gl.TEXTURE_2D, 0)
+}
+
+// Method to update texture parameters for both textures in the buffer
+func (b *Buffer) UpdateTextureParameters(wrap, filter string, sampler api.Sampler) {
+	if wrap == b.wrap && filter == b.filter {
+		// No change in parameters, nothing to do
+		return
+	}
+	minFilter, magFilter := getFilterMode(sampler.Filter)
+	wrapmode := getWrapMode(sampler.Wrap)
+	for i := 0; i < 2; i++ {
+		gl.BindTexture(gl.TEXTURE_2D, b.textureID[i])
+		gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, minFilter)
+		gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, magFilter)
+		gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, wrapmode)
+		gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, wrapmode)
+	}
+	// Unbind to clean up
 	gl.BindTexture(gl.TEXTURE_2D, 0)
 }
 

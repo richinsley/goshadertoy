@@ -68,6 +68,9 @@ func GetChannels(shaderInputs []*api.ShadertoyChannel, width, height int, vao ui
 			if !ok {
 				log.Fatalf("Buffer %s not found for channel %d", chInput.BufferRef, channelIndex)
 			}
+			// update the buffer's filter and wrap modes
+			buffer.UpdateTextureParameters(chInput.Sampler.Wrap, chInput.Sampler.Filter, chInput.Sampler)
+
 			channels[channelIndex] = buffer
 			log.Printf("Assigned Buffer %s to Channel %d.", chInput.BufferRef, channelIndex)
 		case "mic":
