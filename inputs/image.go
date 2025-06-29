@@ -13,7 +13,6 @@ import (
 
 // ImageChannel represents a static image texture input.
 type ImageChannel struct {
-	index      int
 	ctype      string
 	textureID  uint32
 	resolution [3]float32
@@ -38,9 +37,9 @@ func vflip(src *image.RGBA) *image.RGBA {
 }
 
 // NewImageChannel creates and initializes a new OpenGL texture from an image.
-func NewImageChannel(index int, img image.Image, sampler api.Sampler) (*ImageChannel, error) {
+func NewImageChannel(img image.Image, sampler api.Sampler) (*ImageChannel, error) {
 	if img == nil {
-		return nil, fmt.Errorf("input image for channel %d is nil", index)
+		return nil, fmt.Errorf("input image for channel is nil")
 	}
 
 	// Convert source image to RGBA for consistency.
@@ -49,7 +48,7 @@ func NewImageChannel(index int, img image.Image, sampler api.Sampler) (*ImageCha
 
 	// Handle vertical flip if requested.
 	if sampler.VFlip == "true" {
-		log.Printf("Channel %d: Applying vertical flip (vflip=true)", index)
+		log.Printf("Applying vertical flip (vflip=true)")
 		rgba = vflip(rgba)
 	}
 
@@ -66,11 +65,11 @@ func NewImageChannel(index int, img image.Image, sampler api.Sampler) (*ImageCha
 	if sampler.Internal == "float" {
 		// Use a 16-bit floating point format for higher precision.
 		internalFormat = gl.RGBA16F
-		log.Printf("Channel %d: Using float texture format (internal=float)", index)
+		log.Printf("Using float texture format (internal=float)")
 	} else if sampler.SRGB == "true" {
 		// Use an sRGB format. The GPU will automatically linearize colors when sampled.
 		internalFormat = gl.SRGB8_ALPHA8
-		log.Printf("Channel %d: Using sRGB texture format (srgb=true)", index)
+		log.Printf("Using sRGB texture format (srgb=true)")
 	}
 
 	// Set texture parameters (wrapping and filtering).
@@ -103,7 +102,6 @@ func NewImageChannel(index int, img image.Image, sampler api.Sampler) (*ImageCha
 	gl.BindTexture(gl.TEXTURE_2D, 0) // Unbind texture
 
 	return &ImageChannel{
-		index:     index,
 		ctype:     "texture",
 		textureID: textureID,
 		resolution: [3]float32{
@@ -142,7 +140,6 @@ func getFilterMode(filter string) (minFilter, magFilter int32) {
 }
 
 // --- IChannel Interface Implementation ---
-func (c *ImageChannel) GetInputIndex() int        { return c.index }
 func (c *ImageChannel) GetCType() string          { return c.ctype }
 func (c *ImageChannel) Update(uniforms *Uniforms) { /*No-op for static images. */ }
 func (c *ImageChannel) GetTextureID() uint32      { return c.textureID }

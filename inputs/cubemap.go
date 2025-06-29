@@ -12,7 +12,6 @@ import (
 
 // CubeMapChannel represents a cube map texture input.
 type CubeMapChannel struct {
-	index      int
 	ctype      string
 	textureID  uint32
 	resolution [3]float32
@@ -20,7 +19,7 @@ type CubeMapChannel struct {
 }
 
 // NewCubeMapChannel creates and initializes a new OpenGL cube map texture from six images.
-func NewCubeMapChannel(index int, images [6]image.Image, sampler api.Sampler) (*CubeMapChannel, error) {
+func NewCubeMapChannel(images [6]image.Image, sampler api.Sampler) (*CubeMapChannel, error) {
 	for i, img := range images {
 		if img == nil {
 			return nil, fmt.Errorf("input image for cube map face %d is nil", i)
@@ -35,7 +34,7 @@ func NewCubeMapChannel(index int, images [6]image.Image, sampler api.Sampler) (*
 	var internalFormat int32 = gl.RGBA8
 	if sampler.SRGB == "true" {
 		internalFormat = gl.SRGB8_ALPHA8
-		log.Printf("Channel %d (CubeMap): Using sRGB texture format (srgb=true)", index)
+		log.Printf("CubeMap Channel: Using sRGB texture format (srgb=true)")
 	}
 
 	for i := 0; i < 6; i++ {
@@ -93,7 +92,6 @@ func NewCubeMapChannel(index int, images [6]image.Image, sampler api.Sampler) (*
 	height := images[0].Bounds().Dy()
 
 	return &CubeMapChannel{
-		index:     index,
 		ctype:     "cubemap",
 		textureID: textureID,
 		resolution: [3]float32{
@@ -106,7 +104,6 @@ func NewCubeMapChannel(index int, images [6]image.Image, sampler api.Sampler) (*
 }
 
 // --- IChannel Interface Implementation ---
-func (c *CubeMapChannel) GetInputIndex() int        { return c.index }
 func (c *CubeMapChannel) GetCType() string          { return c.ctype }
 func (c *CubeMapChannel) Update(uniforms *Uniforms) { /* No-op for static cube maps. */ }
 func (c *CubeMapChannel) GetTextureID() uint32      { return c.textureID }

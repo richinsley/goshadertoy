@@ -20,7 +20,6 @@ const (
 
 // MicChannel acts as a consumer of an audio stream.
 type MicChannel struct {
-	index       int
 	ctype       string
 	textureID   uint32
 	audioDevice audio.AudioDevice
@@ -35,17 +34,17 @@ type MicChannel struct {
 }
 
 // NewMicChannel creates a channel that gets data from a microphone.
-func NewMicChannel(index int) (*MicChannel, error) {
+func NewMicChannel() (*MicChannel, error) {
 	mic, err := audio.NewMicrophone(44100)
 	if err != nil {
 		log.Printf("Could not initialize microphone: %v. Using silent fallback.", err)
-		return NewMicChannelWithDevice(index, audio.NewNullDevice(44100))
+		return NewMicChannelWithDevice(audio.NewNullDevice(44100))
 	}
-	return NewMicChannelWithDevice(index, mic)
+	return NewMicChannelWithDevice(mic)
 }
 
 // NewMicChannelWithDevice is the core constructor.
-func NewMicChannelWithDevice(index int, device audio.AudioDevice) (*MicChannel, error) {
+func NewMicChannelWithDevice(device audio.AudioDevice) (*MicChannel, error) {
 	var textureID uint32
 	gl.GenTextures(1, &textureID)
 	gl.BindTexture(gl.TEXTURE_2D, textureID)
@@ -57,7 +56,6 @@ func NewMicChannelWithDevice(index int, device audio.AudioDevice) (*MicChannel, 
 	gl.BindTexture(gl.TEXTURE_2D, 0)
 
 	mc := &MicChannel{
-		index:         index,
 		ctype:         "mic",
 		textureID:     textureID,
 		audioDevice:   device,
@@ -73,7 +71,7 @@ func NewMicChannelWithDevice(index int, device audio.AudioDevice) (*MicChannel, 
 
 	go mc.listenForAudio(audioChan)
 
-	log.Printf("Initialized MicChannel %d and started audio listener.", index)
+	log.Printf("Initialized MicChannel and started audio listener.")
 	return mc, nil
 }
 
@@ -88,7 +86,7 @@ func (c *MicChannel) listenForAudio(audioChan <-chan []float32) {
 		}
 		c.mutex.Unlock()
 	}
-	log.Printf("Audio channel for input %d closed. Listener goroutine exiting.", c.index)
+	log.Printf("Audio channel for mic input closed. Listener goroutine exiting.")
 }
 
 // getRecentSamples retrieves the latest samples from the internal history buffer.
@@ -140,7 +138,7 @@ func (c *MicChannel) Update(uniforms *Uniforms) {
 
 // Destroy just calls Stop() on the device.
 func (c *MicChannel) Destroy() {
-	log.Printf("Destroying MicChannel %d and stopping audio device.", c.index)
+	log.Printf("Destroying MicChannel and stopping audio device.")
 	if c.audioDevice != nil {
 		c.audioDevice.Stop() // This will close the channel and stop the goroutine.
 	}
@@ -148,7 +146,6 @@ func (c *MicChannel) Destroy() {
 }
 
 // --- IChannel Interface Implementation ---
-func (c *MicChannel) GetInputIndex() int     { return c.index }
 func (c *MicChannel) GetCType() string       { return c.ctype }
 func (c *MicChannel) GetTextureID() uint32   { return c.textureID }
 func (c *MicChannel) GetSamplerType() string { return "sampler2D" }

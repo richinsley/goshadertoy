@@ -9,7 +9,7 @@ import (
 func GetChannels(shaderInputs []*api.ShadertoyChannel, width, height int, vao uint32, buffers map[string]*Buffer) ([]IChannel, error) {
 	// Create IChannel objects from shader arguments
 	channels := make([]IChannel, 4)
-	for i, chInput := range shaderInputs {
+	for _, chInput := range shaderInputs {
 		if chInput == nil {
 			continue
 		}
@@ -24,21 +24,21 @@ func GetChannels(shaderInputs []*api.ShadertoyChannel, width, height int, vao ui
 		switch chInput.CType {
 		case "texture":
 			if chInput.Data == nil {
-				log.Printf("Warning: Channel %d is a texture but has no image data, skipping.", i)
+				log.Printf("Warning: Channel %d is a texture but has no image data, skipping.", channelIndex)
 				continue
 			}
-			imgChannel, err := NewImageChannel(chInput.Channel, chInput.Data, chInput.Sampler)
+			imgChannel, err := NewImageChannel(chInput.Data, chInput.Sampler)
 			if err != nil {
-				log.Fatalf("Failed to create image channel %d: %v", chInput.Channel, err)
+				log.Fatalf("Failed to create image channel %d: %v", channelIndex, err)
 			}
-			channels[chInput.Channel] = imgChannel
-			log.Printf("Initialized ImageChannel %d.", chInput.Channel)
+			channels[channelIndex] = imgChannel
+			log.Printf("Initialized ImageChannel %d.", channelIndex)
 		case "volume":
 			if chInput.Volume == nil {
 				log.Printf("Warning: Channel %d is a volume but has no data, skipping.", channelIndex)
 				continue
 			}
-			volChannel, err := NewVolumeChannel(channelIndex, chInput.Volume, chInput.Sampler)
+			volChannel, err := NewVolumeChannel(chInput.Volume, chInput.Sampler)
 			if err != nil {
 				log.Fatalf("Failed to create volume channel %d: %v", channelIndex, err)
 			}
@@ -53,15 +53,15 @@ func GetChannels(shaderInputs []*api.ShadertoyChannel, width, height int, vao ui
 				}
 			}
 			if !isComplete {
-				log.Printf("Warning: Channel %d is a cubemap but is missing image data, skipping.", i)
+				log.Printf("Warning: Channel %d is a cubemap but is missing image data, skipping.", channelIndex)
 				continue
 			}
-			cubeChannel, err := NewCubeMapChannel(chInput.Channel, chInput.CubeData, chInput.Sampler)
+			cubeChannel, err := NewCubeMapChannel(chInput.CubeData, chInput.Sampler)
 			if err != nil {
-				log.Fatalf("Failed to create cube map channel %d: %v", chInput.Channel, err)
+				log.Fatalf("Failed to create cube map channel %d: %v", channelIndex, err)
 			}
-			channels[chInput.Channel] = cubeChannel
-			log.Printf("Initialized CubeMapChannel %d.", chInput.Channel)
+			channels[channelIndex] = cubeChannel
+			log.Printf("Initialized CubeMapChannel %d.", channelIndex)
 		case "buffer":
 			// Look up the buffer in the provided map
 			buffer, ok := buffers[chInput.BufferRef]
@@ -69,17 +69,17 @@ func GetChannels(shaderInputs []*api.ShadertoyChannel, width, height int, vao ui
 				log.Fatalf("Buffer %s not found for channel %d", chInput.BufferRef, channelIndex)
 			}
 			channels[channelIndex] = buffer
-			log.Printf("Assigned Buffer %s to Channel %d.", chInput.BufferRef, i)
+			log.Printf("Assigned Buffer %s to Channel %d.", chInput.BufferRef, channelIndex)
 		case "mic":
-			newChannel, err := NewMicChannel(chInput.Channel)
+			newChannel, err := NewMicChannel()
 			if err != nil {
-				log.Fatalf("Failed to create image channel %d: %v", chInput.Channel, err)
+				log.Fatalf("Failed to create mic channel %d: %v", channelIndex, err)
 			}
-			channels[chInput.Channel] = newChannel
-			log.Printf("Initialized MicChannel %d.", chInput.Channel)
+			channels[channelIndex] = newChannel
+			log.Printf("Initialized MicChannel %d.", channelIndex)
 		default:
 			if chInput.CType != "" {
-				log.Printf("Warning: Unsupported channel type '%s' for channel %d.", chInput.CType, i)
+				log.Printf("Warning: Unsupported channel type '%s' for channel %d.", chInput.CType, channelIndex)
 			}
 		}
 	}

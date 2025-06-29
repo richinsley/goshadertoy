@@ -10,7 +10,6 @@ import (
 
 // VolumeChannel represents a 3D volume texture input.
 type VolumeChannel struct {
-	index      int
 	ctype      string
 	textureID  uint32
 	resolution [3]float32
@@ -18,9 +17,9 @@ type VolumeChannel struct {
 }
 
 // NewVolumeChannel creates and initializes a new OpenGL 3D texture from parsed .bin volume data.
-func NewVolumeChannel(index int, vol *api.VolumeData, sampler api.Sampler) (*VolumeChannel, error) {
+func NewVolumeChannel(vol *api.VolumeData, sampler api.Sampler) (*VolumeChannel, error) {
 	if vol == nil || vol.Data == nil {
-		return nil, fmt.Errorf("input volume data for channel %d is nil", index)
+		return nil, fmt.Errorf("input volume data for channel is nil")
 	}
 
 	var textureID uint32
@@ -42,11 +41,11 @@ func NewVolumeChannel(index int, vol *api.VolumeData, sampler api.Sampler) (*Vol
 	internalFormat, format, typ, err := getVolumeFormat(vol.NumChannels, vol.Format)
 	if err != nil {
 		gl.DeleteTextures(1, &textureID)
-		return nil, fmt.Errorf("channel %d: %w", index, err)
+		return nil, fmt.Errorf("volume channel: %w", err)
 	}
 
-	log.Printf("Channel %d (Volume): Uploading %dx%dx%d texture. InternalFormat: 0x%X, Format: 0x%X, Type: 0x%X",
-		index, vol.Width, vol.Height, vol.Depth, internalFormat, format, typ)
+	log.Printf("Volume Channel: Uploading %dx%dx%d texture. InternalFormat: 0x%X, Format: 0x%X, Type: 0x%X",
+		vol.Width, vol.Height, vol.Depth, internalFormat, format, typ)
 
 	// Upload the 3D texture data to the GPU.
 	gl.TexImage3D(
@@ -70,7 +69,6 @@ func NewVolumeChannel(index int, vol *api.VolumeData, sampler api.Sampler) (*Vol
 	gl.BindTexture(gl.TEXTURE_3D, 0) // Unbind
 
 	return &VolumeChannel{
-		index:     index,
 		ctype:     "volume",
 		textureID: textureID,
 		resolution: [3]float32{
@@ -127,7 +125,6 @@ func getVolumeFormat(numChannels uint8, binFormat uint16) (internalFormat int32,
 }
 
 // --- IChannel Interface Implementation ---
-func (c *VolumeChannel) GetInputIndex() int        { return c.index }
 func (c *VolumeChannel) GetCType() string          { return c.ctype }
 func (c *VolumeChannel) Update(uniforms *Uniforms) { /* No-op for static volumes */ }
 func (c *VolumeChannel) GetTextureID() uint32      { return c.textureID }

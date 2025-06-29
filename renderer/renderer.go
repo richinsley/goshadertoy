@@ -59,16 +59,19 @@ func NewRenderer() (*Renderer, error) {
 func (r *Renderer) Shutdown() {
 	for _, pass := range r.namedPasses {
 		gl.DeleteProgram(pass.shaderProgram)
-
-		// Clean up channel resources
-		for _, ch := range pass.channels {
-			if ch != nil {
-				ch.Destroy()
-			}
-		}
 	}
 	for _, buffer := range r.buffers {
 		buffer.Destroy()
+	}
+	for _, pass := range r.namedPasses {
+		for _, ch := range pass.channels {
+			if ch != nil {
+				// avoid double destroying buffers
+				if _, ok := ch.(*inputs.Buffer); !ok {
+					ch.Destroy()
+				}
+			}
+		}
 	}
 
 	gl.DeleteVertexArrays(1, &r.quadVAO)
@@ -192,7 +195,7 @@ func (r *Renderer) InitScene(shaderArgs *api.ShaderArgs) error {
 	width, height := r.context.GetFramebufferSize()
 	for _, name := range []string{"A", "B", "C", "D"} {
 		if _, exists := shaderArgs.Buffers[name]; exists {
-			buffer, err := inputs.NewBuffer(len(r.buffers), width, height, r.quadVAO)
+			buffer, err := inputs.NewBuffer(width, height, r.quadVAO)
 			if err != nil {
 				return fmt.Errorf("failed to create buffer %s: %w", name, err)
 			}
@@ -222,9 +225,21 @@ func (r *Renderer) Run() {
 	var lastMouseClickX, lastMouseClickY float64
 	var mouseWasDown bool
 	var frameCount int32 = 0
+	// Keep track of the last size to detect changes.
+	var lastWidth, lastHeight int = -1, -1
+
 	for !r.context.ShouldClose() {
 		currentTime := r.context.Time() - startTime
 		width, height := r.context.GetFramebufferSize()
+
+		// If the window size has changed, resize the buffers.
+		if width != lastWidth || height != lastHeight {
+			for _, buffer := range r.buffers {
+				buffer.Resize(width, height)
+			}
+			lastWidth, lastHeight = width, height
+		}
+
 		// Prepare uniform data that is common to all passes
 		var mouseData [4]float32
 		if win != nil {
@@ -301,12 +316,11 @@ func updateUniforms(pass *RenderPass, width, height int, uniforms *inputs.Unifor
 }
 
 func bindChannels(pass *RenderPass, uniforms *inputs.Uniforms) {
-	for _, ch := range pass.channels {
+	for chIndex, ch := range pass.channels {
 		if ch == nil {
 			continue
 		}
 		ch.Update(uniforms)
-		chIndex := ch.GetInputIndex()
 		var texTarget uint32
 		switch ch.GetSamplerType() {
 		case "sampler3D":
@@ -330,7 +344,7 @@ func bindChannels(pass *RenderPass, uniforms *inputs.Uniforms) {
 	}
 }
 func unbindChannels(pass *RenderPass) {
-	for _, ch := range pass.channels {
+	for chIndex, ch := range pass.channels {
 		if ch != nil {
 			var texTarget uint32
 			switch ch.GetSamplerType() {
@@ -341,7 +355,7 @@ func unbindChannels(pass *RenderPass) {
 			default:
 				texTarget = gl.TEXTURE_2D
 			}
-			gl.ActiveTexture(gl.TEXTURE0 + uint32(ch.GetInputIndex()))
+			gl.ActiveTexture(gl.TEXTURE0 + uint32(chIndex))
 			gl.BindTexture(texTarget, 0)
 		}
 	}

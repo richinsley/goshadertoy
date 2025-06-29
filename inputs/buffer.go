@@ -9,7 +9,6 @@ import (
 // Buffer manages two sets of FBOs and textures for double-buffering.
 // This allows for effects where a shader pass reads from the output of the previous frame.
 type Buffer struct {
-	index int
 	ctype string
 
 	// Double-buffering resources
@@ -28,9 +27,8 @@ type Buffer struct {
 
 // NewBuffer creates the necessary OpenGL resources for a render buffer.
 // It initializes two framebuffers and two textures for double buffering.
-func NewBuffer(index int, width, height int, vao uint32) (*Buffer, error) {
+func NewBuffer(width, height int, vao uint32) (*Buffer, error) {
 	b := &Buffer{
-		index:      index,
 		ctype:      "buffer",
 		QuadVAO:    vao,
 		readIndex:  0,
@@ -54,7 +52,7 @@ func NewBuffer(index int, width, height int, vao uint32) (*Buffer, error) {
 		gl.FramebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0)
 
 		if gl.CheckFramebufferStatus(gl.FRAMEBUFFER) != gl.FRAMEBUFFER_COMPLETE {
-			return nil, fmt.Errorf("framebuffer %d for buffer %d is not complete", i, index)
+			return nil, fmt.Errorf("framebuffer %d for buffer is not complete", i)
 		}
 
 		b.fbo[i] = fbo
@@ -91,6 +89,12 @@ func (b *Buffer) GetTextureID() uint32 {
 
 // Resize changes the size of both textures and their FBO attachments.
 func (b *Buffer) Resize(width, height int) {
+	if width == int(b.resolution[0]) && height == int(b.resolution[1]) {
+		// No change in size, nothing to do
+		return
+	}
+
+	// Delete old textures and FBOs
 	b.resolution = [3]float32{float32(width), float32(height), 1.0}
 	for i := 0; i < 2; i++ {
 		gl.BindTexture(gl.TEXTURE_2D, b.textureID[i])
@@ -100,7 +104,6 @@ func (b *Buffer) Resize(width, height int) {
 }
 
 // --- IChannel Interface Implementation ---
-func (b *Buffer) GetInputIndex() int        { return b.index }
 func (b *Buffer) GetCType() string          { return b.ctype }
 func (b *Buffer) Update(uniforms *Uniforms) { /* The renderer will handle updating buffers */ }
 func (b *Buffer) ChannelRes() [3]float32    { return b.resolution }
