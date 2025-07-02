@@ -28,14 +28,55 @@ type RenderPass struct {
 	iChannelResolutionLoc [4]int32
 }
 
+// OffscreenRenderer manages a framebuffer for offscreen rendering.
+type OffscreenRenderer struct {
+	fbo       uint32
+	textureID uint32
+	width     int
+	height    int
+}
+
+// NewOffscreenRenderer creates a new offscreen renderer
+func NewOffscreenRenderer(width, height int) (*OffscreenRenderer, error) {
+	or := &OffscreenRenderer{
+		width:  width,
+		height: height,
+	}
+
+	gl.GenFramebuffers(1, &or.fbo)
+	gl.BindFramebuffer(gl.FRAMEBUFFER, or.fbo)
+
+	gl.GenTextures(1, &or.textureID)
+	gl.BindTexture(gl.TEXTURE_2D, or.textureID)
+	gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, int32(width), int32(height), 0, gl.RGBA, gl.FLOAT, nil)
+	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+	gl.FramebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, or.textureID, 0)
+
+	if gl.CheckFramebufferStatus(gl.FRAMEBUFFER) != gl.FRAMEBUFFER_COMPLETE {
+		return nil, fmt.Errorf("offscreen framebuffer is not complete")
+	}
+
+	gl.BindFramebuffer(gl.FRAMEBUFFER, 0)
+	return or, nil
+}
+
+// Destroy cleans up the offscreen renderer's resources.
+func (or *OffscreenRenderer) Destroy() {
+	gl.DeleteFramebuffers(1, &or.fbo)
+	gl.DeleteTextures(1, &or.textureID)
+}
+
 // Renderer encapsulates the OpenGL state for drawing a shader.
 type Renderer struct {
 	// The context is provided by the dedicated glfwcontext package.
-	context      *glfwcontext.Context
-	quadVAO      uint32
-	bufferPasses []*RenderPass          // ordered list of buffer render passes
-	namedPasses  map[string]*RenderPass // named render passes for easy access
-	buffers      map[string]*inputs.Buffer
+	context           *glfwcontext.Context
+	quadVAO           uint32
+	bufferPasses      []*RenderPass          // ordered list of buffer render passes
+	namedPasses       map[string]*RenderPass // named render passes for easy access
+	buffers           map[string]*inputs.Buffer
+	offscreenRenderer *OffscreenRenderer
+	blitProgram       uint32
 }
 
 // NewRenderer creates a new renderer and initializes its graphics context.
@@ -52,6 +93,13 @@ func NewRenderer() (*Renderer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize glfw context: %w", err)
 	}
+
+	width, height := r.context.GetFramebufferSize()
+	r.offscreenRenderer, err = NewOffscreenRenderer(width, height)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create offscreen renderer: %w", err)
+	}
+
 	return r, nil
 }
 
@@ -73,7 +121,8 @@ func (r *Renderer) Shutdown() {
 			}
 		}
 	}
-
+	gl.DeleteProgram(r.blitProgram)
+	r.offscreenRenderer.Destroy()
 	gl.DeleteVertexArrays(1, &r.quadVAO)
 	r.context.Shutdown()
 }
@@ -191,6 +240,12 @@ func (r *Renderer) InitScene(shaderArgs *api.ShaderArgs) error {
 	gl.BindBuffer(gl.ARRAY_BUFFER, 0)
 	gl.BindVertexArray(0)
 
+	// Create the blit program
+	r.blitProgram, err = newProgram(shader.GenerateVertexShader(), shader.GetBlitFragmentShader())
+	if err != nil {
+		return fmt.Errorf("failed to create blit program: %w", err)
+	}
+
 	// Create the buffer objects first
 	width, height := r.context.GetFramebufferSize()
 	for _, name := range []string{"A", "B", "C", "D"} {
@@ -218,116 +273,134 @@ func (r *Renderer) InitScene(shaderArgs *api.ShaderArgs) error {
 	return nil
 }
 
-// Run starts the main render loop. It handles all standard uniform updates internally.
+// RenderFrame renders a single frame to the offscreen buffer.
+func (r *Renderer) RenderFrame(time float64, frameCount int32, mouseData [4]float32) {
+	// Get the framebuffer size in actual pixels. This is used for iResolution.
+	fbWidth, fbHeight := r.context.GetFramebufferSize()
+
+	// If the window size has changed, resize the buffers.
+	if fbWidth != r.offscreenRenderer.width || fbHeight != r.offscreenRenderer.height {
+		for _, buffer := range r.buffers {
+			buffer.Resize(fbWidth, fbHeight)
+		}
+		// Resize the offscreen renderer as well
+		gl.BindTexture(gl.TEXTURE_2D, r.offscreenRenderer.textureID)
+		gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, int32(fbWidth), int32(fbHeight), 0, gl.RGBA, gl.FLOAT, nil)
+		r.offscreenRenderer.width = fbWidth
+		r.offscreenRenderer.height = fbHeight
+	}
+
+	uniforms := &inputs.Uniforms{
+		Time:  float32(time),
+		Mouse: mouseData,
+		Frame: frameCount,
+	}
+
+	// Render buffer passes
+	for _, pass := range r.bufferPasses {
+		if pass.buffer != nil {
+			pass.buffer.BindForWriting()
+		}
+
+		gl.UseProgram(pass.shaderProgram)
+		updateUniforms(pass, fbWidth, fbHeight, uniforms)
+		bindChannels(pass, uniforms)
+		gl.Viewport(0, 0, int32(fbWidth), int32(fbHeight))
+		gl.Clear(gl.COLOR_BUFFER_BIT)
+		gl.BindVertexArray(r.quadVAO)
+		gl.DrawArrays(gl.TRIANGLES, 0, 6)
+		unbindChannels(pass)
+
+		if pass.buffer != nil {
+			pass.buffer.UnbindForWriting()
+			pass.buffer.SwapBuffers()
+		}
+	}
+
+	// Render the final image pass to the offscreen framebuffer
+	gl.BindFramebuffer(gl.FRAMEBUFFER, r.offscreenRenderer.fbo)
+	imagePass := r.namedPasses["image"]
+	gl.UseProgram(imagePass.shaderProgram)
+	updateUniforms(imagePass, fbWidth, fbHeight, uniforms)
+	bindChannels(imagePass, uniforms)
+	gl.Viewport(0, 0, int32(fbWidth), int32(fbHeight))
+	gl.Clear(gl.COLOR_BUFFER_BIT)
+	gl.BindVertexArray(r.quadVAO)
+	gl.DrawArrays(gl.TRIANGLES, 0, 6)
+	unbindChannels(imagePass)
+	gl.BindFramebuffer(gl.FRAMEBUFFER, 0)
+}
+
+// Run starts the main interactive render loop.
 func (r *Renderer) Run() {
 	startTime := r.context.Time()
-	win := r.context.Window()
+	var frameCount int32 = 0
 	var lastMouseClickX, lastMouseClickY float64
 	var mouseWasDown bool
-	var frameCount int32 = 0
-	// Keep track of the last size to detect changes.
-	var lastWidth, lastHeight int = -1, -1
 
 	for !r.context.ShouldClose() {
 		currentTime := r.context.Time() - startTime
-		// Get the framebuffer size in actual pixels. This is used for iResolution.
-		fbWidth, fbHeight := r.context.GetFramebufferSize()
 
-		// If the window size has changed, resize the buffers.
-		if fbWidth != lastWidth || fbHeight != lastHeight {
-			for _, buffer := range r.buffers {
-				buffer.Resize(fbWidth, fbHeight)
-			}
-			lastWidth, lastHeight = fbWidth, fbHeight
-		}
-
-		// Prepare uniform data that is common to all passes
+		// Handle mouse input
 		var mouseData [4]float32
+		win := r.context.Window()
 		if win != nil {
-			// Get window size in screen coordinates (logical pixels).
+			fbWidth, fbHeight := r.context.GetFramebufferSize()
 			winWidth, winHeight := win.GetSize()
 
-			// Calculate DPI scaling factor. This is crucial for high-DPI displays
-			// where window coordinates and framebuffer pixels don't match.
 			var scaleX, scaleY float64 = 1.0, 1.0
 			if winWidth > 0 && winHeight > 0 {
 				scaleX = float64(fbWidth) / float64(winWidth)
 				scaleY = float64(fbHeight) / float64(winHeight)
 			}
 
-			// Get cursor position in screen coordinates.
 			cursorX, cursorY := win.GetCursorPos()
-
-			// Scale cursor coordinates to framebuffer pixel coordinates.
 			pixelX := cursorX * scaleX
-			pixelY := cursorY * scaleY // Y is still from top-left here
+			pixelY := cursorY * scaleY
 
-			// Calculate mouseX and mouseY for the shader in pixel coordinates.
 			mouseX := float32(pixelX)
-			mouseY := float32(fbHeight) - float32(pixelY) // Flip Y for OpenGL coordinates
+			mouseY := float32(fbHeight) - float32(pixelY)
 
 			const mouseLeft = 0
-			isMouseDown := win.GetMouseButton(mouseLeft) == 1 // 1 is glfw.Press
+			isMouseDown := win.GetMouseButton(mouseLeft) == 1
 
 			if isMouseDown && !mouseWasDown {
-				// Store the click position in scaled pixel coordinates.
 				lastMouseClickX = pixelX
 				lastMouseClickY = pixelY
 			}
 			mouseWasDown = isMouseDown
 
-			// Calculate clickX and clickY for the shader.
 			clickX := float32(lastMouseClickX)
-			clickY := float32(fbHeight) - float32(lastMouseClickY) // Flip Y for OpenGL
+			clickY := float32(fbHeight) - float32(lastMouseClickY)
 
 			if !isMouseDown {
-				// Shadertoy negates z/w when the mouse button is up.
 				clickX = -clickX
 				clickY = -clickY
 			}
 			mouseData = [4]float32{mouseX, mouseY, clickX, clickY}
 		}
 
-		uniforms := &inputs.Uniforms{
-			Time:  float32(currentTime),
-			Mouse: mouseData,
-			Frame: frameCount,
-		}
+		r.RenderFrame(currentTime, frameCount, mouseData)
 
-		// Render buffer passes
-		for _, pass := range r.bufferPasses {
-			if pass.buffer != nil {
-				pass.buffer.BindForWriting()
-			}
-
-			gl.UseProgram(pass.shaderProgram)
-			updateUniforms(pass, fbWidth, fbHeight, uniforms)
-			bindChannels(pass, uniforms)
-			gl.Viewport(0, 0, int32(fbWidth), int32(fbHeight))
-			gl.Clear(gl.COLOR_BUFFER_BIT)
-			gl.BindVertexArray(r.quadVAO)
-			gl.DrawArrays(gl.TRIANGLES, 0, 6)
-			unbindChannels(pass)
-
-			if pass.buffer != nil {
-				pass.buffer.UnbindForWriting()
-				pass.buffer.SwapBuffers()
-			}
-		}
-
-		// Render the final image pass to the screen
-		imagePass := r.namedPasses["image"]
-		gl.UseProgram(imagePass.shaderProgram)
-		updateUniforms(imagePass, fbWidth, fbHeight, uniforms)
-		bindChannels(imagePass, uniforms)
+		// Blit the offscreen texture to the screen
+		fbWidth, fbHeight := r.context.GetFramebufferSize()
 		gl.Viewport(0, 0, int32(fbWidth), int32(fbHeight))
 		gl.Clear(gl.COLOR_BUFFER_BIT)
+		gl.UseProgram(r.blitProgram)
+		gl.ActiveTexture(gl.TEXTURE0)
+		gl.BindTexture(gl.TEXTURE_2D, r.offscreenRenderer.textureID)
 		gl.BindVertexArray(r.quadVAO)
 		gl.DrawArrays(gl.TRIANGLES, 0, 6)
-		unbindChannels(imagePass)
+		gl.BindTexture(gl.TEXTURE_2D, 0)
+
 		r.context.EndFrame()
 		frameCount++
 	}
+}
+
+// RunOffscreen is intended for rendering without a window.
+func (r *Renderer) RunOffscreen() {
+	// TODO: Implement offscreen rendering logic.
 }
 
 func updateUniforms(pass *RenderPass, width, height int, uniforms *inputs.Uniforms) {

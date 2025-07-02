@@ -9,13 +9,29 @@ import (
 // A simple vertex shader for drawing a fullscreen quad.
 const vertexShaderSource = `#version 410 core
 layout (location = 0) in vec2 in_vert;
+out vec2 frag_uv;
 void main() {
+	frag_uv = in_vert * 0.5 + 0.5;
     gl_Position = vec4(in_vert, 0.0, 1.0);
+}
+`
+
+const blitFragmentShaderSource = `#version 410 core
+in vec2 frag_uv;
+out vec4 fragColor;
+uniform sampler2D u_texture;
+
+void main() {
+    fragColor = texture(u_texture, frag_uv);
 }
 `
 
 func GenerateVertexShader() string {
 	return vertexShaderSource
+}
+
+func GetBlitFragmentShader() string {
+	return blitFragmentShaderSource
 }
 
 // GeneratePreamble creates the GLSL preamble with dynamic sampler types.
