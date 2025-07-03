@@ -35,10 +35,17 @@ type Renderer struct {
 	buffers           map[string]*inputs.Buffer
 	offscreenRenderer *OffscreenRenderer
 	blitProgram       uint32
+	width             int
+	height            int
+	recordMode        bool
 }
 
 func NewRenderer(width, height int, visible bool) (*Renderer, error) {
-	r := &Renderer{}
+	r := &Renderer{
+		width:      width,
+		height:     height,
+		recordMode: !visible, // Set recordMode based on window visibility
+	}
 	var err error
 
 	r.namedPasses = make(map[string]*RenderPass)
@@ -50,8 +57,8 @@ func NewRenderer(width, height int, visible bool) (*Renderer, error) {
 		return nil, fmt.Errorf("failed to initialize glfw context: %w", err)
 	}
 
-	w, h := r.context.GetFramebufferSize()
-	r.offscreenRenderer, err = NewOffscreenRenderer(w, h)
+	// Use the stored width and height to create the offscreen renderer
+	r.offscreenRenderer, err = NewOffscreenRenderer(r.width, r.height)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create offscreen renderer: %w", err)
 	}
@@ -185,6 +192,11 @@ func (r *Renderer) InitScene(shaderArgs *api.ShaderArgs) error {
 	}
 
 	width, height := r.context.GetFramebufferSize()
+	if r.recordMode {
+		width = r.offscreenRenderer.width
+		height = r.offscreenRenderer.height
+	}
+
 	for _, name := range []string{"A", "B", "C", "D"} {
 		if _, exists := shaderArgs.Buffers[name]; exists {
 			buffer, err := inputs.NewBuffer(width, height, r.quadVAO)
@@ -210,15 +222,46 @@ func (r *Renderer) InitScene(shaderArgs *api.ShaderArgs) error {
 }
 
 func (r *Renderer) RenderFrame(time float64, frameCount int32, mouseData [4]float32) {
-	fbWidth, fbHeight := r.context.GetFramebufferSize()
-	if fbWidth != r.offscreenRenderer.width || fbHeight != r.offscreenRenderer.height {
-		for _, buffer := range r.buffers {
-			buffer.Resize(fbWidth, fbHeight)
+	// fbWidth, fbHeight := r.context.GetFramebufferSize()
+	// if fbWidth != r.offscreenRenderer.width || fbHeight != r.offscreenRenderer.height {
+	// 	for _, buffer := range r.buffers {
+	// 		buffer.Resize(fbWidth, fbHeight)
+	// 	}
+	// 	gl.BindTexture(gl.TEXTURE_2D, r.offscreenRenderer.textureID)
+	// 	gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, int32(fbWidth), int32(fbHeight), 0, gl.RGBA, gl.FLOAT, nil)
+	// 	r.offscreenRenderer.width = fbWidth
+	// 	r.offscreenRenderer.height = fbHeight
+	// }
+
+	// uniforms := &inputs.Uniforms{
+	// 	Time:  float32(time),
+	// 	Mouse: mouseData,
+	// 	Frame: frameCount,
+	// }
+
+	var renderWidth, renderHeight int
+
+	if r.recordMode {
+		// In record mode, the render size is fixed to the stored dimensions.
+		renderWidth = r.width
+		renderHeight = r.height
+	} else {
+		// In interactive mode, match the window's framebuffer size to allow resizing.
+		fbWidth, fbHeight := r.context.GetFramebufferSize()
+		renderWidth = fbWidth
+		renderHeight = fbHeight
+
+		// Resize all resources if the window size changed.
+		if fbWidth != r.offscreenRenderer.width || fbHeight != r.offscreenRenderer.height {
+			r.offscreenRenderer.width = fbWidth
+			r.offscreenRenderer.height = fbHeight
+			gl.BindTexture(gl.TEXTURE_2D, r.offscreenRenderer.textureID)
+			gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, int32(fbWidth), int32(fbHeight), 0, gl.RGBA, gl.FLOAT, nil)
+
+			for _, buffer := range r.buffers {
+				buffer.Resize(fbWidth, fbHeight)
+			}
 		}
-		gl.BindTexture(gl.TEXTURE_2D, r.offscreenRenderer.textureID)
-		gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, int32(fbWidth), int32(fbHeight), 0, gl.RGBA, gl.FLOAT, nil)
-		r.offscreenRenderer.width = fbWidth
-		r.offscreenRenderer.height = fbHeight
 	}
 
 	uniforms := &inputs.Uniforms{
@@ -233,9 +276,9 @@ func (r *Renderer) RenderFrame(time float64, frameCount int32, mouseData [4]floa
 		}
 
 		gl.UseProgram(pass.shaderProgram)
-		updateUniforms(pass, fbWidth, fbHeight, uniforms)
+		updateUniforms(pass, renderWidth, renderHeight, uniforms)
 		bindChannels(pass, uniforms)
-		gl.Viewport(0, 0, int32(fbWidth), int32(fbHeight))
+		gl.Viewport(0, 0, int32(renderWidth), int32(renderHeight))
 		gl.Clear(gl.COLOR_BUFFER_BIT)
 		gl.BindVertexArray(r.quadVAO)
 		gl.DrawArrays(gl.TRIANGLES, 0, 6)
@@ -250,9 +293,9 @@ func (r *Renderer) RenderFrame(time float64, frameCount int32, mouseData [4]floa
 	gl.BindFramebuffer(gl.FRAMEBUFFER, r.offscreenRenderer.fbo)
 	imagePass := r.namedPasses["image"]
 	gl.UseProgram(imagePass.shaderProgram)
-	updateUniforms(imagePass, fbWidth, fbHeight, uniforms)
+	updateUniforms(imagePass, renderWidth, renderHeight, uniforms)
 	bindChannels(imagePass, uniforms)
-	gl.Viewport(0, 0, int32(fbWidth), int32(fbHeight))
+	gl.Viewport(0, 0, int32(renderWidth), int32(renderHeight))
 	gl.Clear(gl.COLOR_BUFFER_BIT)
 	gl.BindVertexArray(r.quadVAO)
 	gl.DrawArrays(gl.TRIANGLES, 0, 6)

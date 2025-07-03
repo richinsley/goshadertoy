@@ -29,7 +29,7 @@ func runShadertoy(shaderArgs *api.ShaderArgs, record bool, duration float64, fps
 	if record {
 		// Start the offscreen render loop
 		log.Println("Starting offscreen render loop...")
-		err = r.RunOffscreen(duration, fps, outputFile)
+		err = r.RunOffscreen(width, height, duration, fps, outputFile) // New call with width and height
 		if err != nil {
 			log.Fatalf("Offscreen rendering failed: %v", err)
 		}
