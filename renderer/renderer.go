@@ -3,7 +3,9 @@ package renderer
 import (
 	"context"
 	"fmt"
+	"io"
 	"strings"
+	"time"
 
 	"github.com/go-gl/gl/v4.1-core/gl"
 	api "github.com/richinsley/goshadertoy/api"
@@ -11,15 +13,15 @@ import (
 	inputs "github.com/richinsley/goshadertoy/inputs"
 	shader "github.com/richinsley/goshadertoy/shader"
 	gst "github.com/richinsley/goshadertranslator"
+	ffmpeg "github.com/u2takey/ffmpeg-go"
 )
 
 var translator *gst.ShaderTranslator
 
 type RenderPass struct {
-	shaderProgram uint32
-	channels      []inputs.IChannel
-	buffer        *inputs.Buffer // The buffer this pass renders to (if any)
-	// Uniform locations are cached for performance.
+	shaderProgram         uint32
+	channels              []inputs.IChannel
+	buffer                *inputs.Buffer // The buffer this pass renders to (if any)
 	resolutionLoc         int32
 	timeLoc               int32
 	mouseLoc              int32
@@ -28,7 +30,6 @@ type RenderPass struct {
 	iChannelResolutionLoc [4]int32
 }
 
-// OffscreenRenderer manages a framebuffer for offscreen rendering.
 type OffscreenRenderer struct {
 	fbo       uint32
 	textureID uint32
@@ -36,7 +37,6 @@ type OffscreenRenderer struct {
 	height    int
 }
 
-// NewOffscreenRenderer creates a new offscreen renderer
 func NewOffscreenRenderer(width, height int) (*OffscreenRenderer, error) {
 	or := &OffscreenRenderer{
 		width:  width,
@@ -61,26 +61,22 @@ func NewOffscreenRenderer(width, height int) (*OffscreenRenderer, error) {
 	return or, nil
 }
 
-// Destroy cleans up the offscreen renderer's resources.
 func (or *OffscreenRenderer) Destroy() {
 	gl.DeleteFramebuffers(1, &or.fbo)
 	gl.DeleteTextures(1, &or.textureID)
 }
 
-// Renderer encapsulates the OpenGL state for drawing a shader.
 type Renderer struct {
-	// The context is provided by the dedicated glfwcontext package.
 	context           *glfwcontext.Context
 	quadVAO           uint32
-	bufferPasses      []*RenderPass          // ordered list of buffer render passes
-	namedPasses       map[string]*RenderPass // named render passes for easy access
+	bufferPasses      []*RenderPass
+	namedPasses       map[string]*RenderPass
 	buffers           map[string]*inputs.Buffer
 	offscreenRenderer *OffscreenRenderer
 	blitProgram       uint32
 }
 
-// NewRenderer creates a new renderer and initializes its graphics context.
-func NewRenderer() (*Renderer, error) {
+func NewRenderer(width, height int, visible bool) (*Renderer, error) {
 	r := &Renderer{}
 	var err error
 
@@ -88,14 +84,13 @@ func NewRenderer() (*Renderer, error) {
 	r.bufferPasses = make([]*RenderPass, 0)
 	r.buffers = make(map[string]*inputs.Buffer)
 
-	// We now instantiate the context from the new package.
-	r.context, err = glfwcontext.NewContext()
+	r.context, err = glfwcontext.New(width, height, visible)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize glfw context: %w", err)
 	}
 
-	width, height := r.context.GetFramebufferSize()
-	r.offscreenRenderer, err = NewOffscreenRenderer(width, height)
+	w, h := r.context.GetFramebufferSize()
+	r.offscreenRenderer, err = NewOffscreenRenderer(w, h)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create offscreen renderer: %w", err)
 	}
@@ -103,7 +98,6 @@ func NewRenderer() (*Renderer, error) {
 	return r, nil
 }
 
-// Shutdown cleans up OpenGL objects and terminates the context.
 func (r *Renderer) Shutdown() {
 	for _, pass := range r.namedPasses {
 		gl.DeleteProgram(pass.shaderProgram)
@@ -114,7 +108,6 @@ func (r *Renderer) Shutdown() {
 	for _, pass := range r.namedPasses {
 		for _, ch := range pass.channels {
 			if ch != nil {
-				// avoid double destroying buffers
 				if _, ok := ch.(*inputs.Buffer); !ok {
 					ch.Destroy()
 				}
@@ -127,17 +120,14 @@ func (r *Renderer) Shutdown() {
 	r.context.Shutdown()
 }
 
-// Fullscreen quad vertices.
 var quadVertices = []float32{
 	-1.0, 1.0, -1.0, -1.0, 1.0, -1.0,
 	-1.0, 1.0, 1.0, -1.0, 1.0, 1.0,
 }
 
 func (r *Renderer) GetRenderPass(name string, shaderArgs *api.ShaderArgs) (*RenderPass, error) {
-
-	// Create a new RenderPass if it doesn't exist
 	if name == "" {
-		name = "image" // Default to image pass
+		name = "image"
 	}
 
 	var passArgs *api.BufferRenderPass
@@ -147,17 +137,12 @@ func (r *Renderer) GetRenderPass(name string, shaderArgs *api.ShaderArgs) (*Rend
 	}
 
 	width, height := r.context.GetFramebufferSize()
-
-	// Create IChannel objects from shader arguments
 	channels, err := inputs.GetChannels(passArgs.Inputs, width, height, r.quadVAO, r.buffers)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create channels: %w", err)
 	}
 
-	// Generate the full fragment shader source
 	fullFragmentSource := shader.GetFragmentShader(channels, shaderArgs.CommonCode, passArgs.Code)
-
-	// translate the shader to GLSL
 	fsShader, err := translator.TranslateShader(fullFragmentSource, "fragment", gst.ShaderSpecWebGL2, gst.OutputFormatGLSL330)
 	if err != nil {
 		return nil, fmt.Errorf("fragment shader translation failed: %w", err)
@@ -171,18 +156,15 @@ func (r *Renderer) GetRenderPass(name string, shaderArgs *api.ShaderArgs) (*Rend
 		retv.buffer = r.buffers[name]
 	}
 
-	// get the standard vertex shader source
 	vertexShaderSource := shader.GenerateVertexShader()
-
 	retv.shaderProgram, err = newProgram(vertexShaderSource, fsShader.Code)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create shader program: %w", err)
 	}
-	retv.channels = channels // Store channels
+	retv.channels = channels
 	uniformMap := fsShader.Variables
 	gl.UseProgram(retv.shaderProgram)
 
-	// Query uniform locations using the mapped names from the translator.
 	retv.resolutionLoc = -1
 	retv.timeLoc = -1
 	retv.mouseLoc = -1
@@ -200,7 +182,6 @@ func (r *Renderer) GetRenderPass(name string, shaderArgs *api.ShaderArgs) (*Rend
 		retv.frameLoc = gl.GetUniformLocation(retv.shaderProgram, gl.Str(v.MappedName+"\x00"))
 	}
 
-	// iChannel0 to iChannel3
 	for i := 0; i < 4; i++ {
 		samplerName := fmt.Sprintf("iChannel%d", i)
 		resolutionName := fmt.Sprintf("iChannelResolution[%d]", i)
@@ -217,9 +198,7 @@ func (r *Renderer) GetRenderPass(name string, shaderArgs *api.ShaderArgs) (*Rend
 	return retv, nil
 }
 
-// InitScene compiles shaders and sets up vertex data.
 func (r *Renderer) InitScene(shaderArgs *api.ShaderArgs) error {
-	// see if we need a translator
 	var err error
 	if translator == nil {
 		ctx := context.Background()
@@ -228,7 +207,6 @@ func (r *Renderer) InitScene(shaderArgs *api.ShaderArgs) error {
 			return err
 		}
 	}
-	// Create Vertex Array Object (VAO) and Vertex Buffer Object (VBO) for the quad.
 	var vbo uint32
 	gl.GenVertexArrays(1, &r.quadVAO)
 	gl.GenBuffers(1, &vbo)
@@ -240,13 +218,11 @@ func (r *Renderer) InitScene(shaderArgs *api.ShaderArgs) error {
 	gl.BindBuffer(gl.ARRAY_BUFFER, 0)
 	gl.BindVertexArray(0)
 
-	// Create the blit program
 	r.blitProgram, err = newProgram(shader.GenerateVertexShader(), shader.GetBlitFragmentShader())
 	if err != nil {
 		return fmt.Errorf("failed to create blit program: %w", err)
 	}
 
-	// Create the buffer objects first
 	width, height := r.context.GetFramebufferSize()
 	for _, name := range []string{"A", "B", "C", "D"} {
 		if _, exists := shaderArgs.Buffers[name]; exists {
@@ -258,7 +234,6 @@ func (r *Renderer) InitScene(shaderArgs *api.ShaderArgs) error {
 		}
 	}
 
-	// Create the image pass and any buffer passes.
 	passnames := []string{"A", "B", "C", "D", "image"}
 	for _, name := range passnames {
 		pass, err := r.GetRenderPass(name, shaderArgs)
@@ -273,17 +248,12 @@ func (r *Renderer) InitScene(shaderArgs *api.ShaderArgs) error {
 	return nil
 }
 
-// RenderFrame renders a single frame to the offscreen buffer.
 func (r *Renderer) RenderFrame(time float64, frameCount int32, mouseData [4]float32) {
-	// Get the framebuffer size in actual pixels. This is used for iResolution.
 	fbWidth, fbHeight := r.context.GetFramebufferSize()
-
-	// If the window size has changed, resize the buffers.
 	if fbWidth != r.offscreenRenderer.width || fbHeight != r.offscreenRenderer.height {
 		for _, buffer := range r.buffers {
 			buffer.Resize(fbWidth, fbHeight)
 		}
-		// Resize the offscreen renderer as well
 		gl.BindTexture(gl.TEXTURE_2D, r.offscreenRenderer.textureID)
 		gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, int32(fbWidth), int32(fbHeight), 0, gl.RGBA, gl.FLOAT, nil)
 		r.offscreenRenderer.width = fbWidth
@@ -296,7 +266,6 @@ func (r *Renderer) RenderFrame(time float64, frameCount int32, mouseData [4]floa
 		Frame: frameCount,
 	}
 
-	// Render buffer passes
 	for _, pass := range r.bufferPasses {
 		if pass.buffer != nil {
 			pass.buffer.BindForWriting()
@@ -317,7 +286,6 @@ func (r *Renderer) RenderFrame(time float64, frameCount int32, mouseData [4]floa
 		}
 	}
 
-	// Render the final image pass to the offscreen framebuffer
 	gl.BindFramebuffer(gl.FRAMEBUFFER, r.offscreenRenderer.fbo)
 	imagePass := r.namedPasses["image"]
 	gl.UseProgram(imagePass.shaderProgram)
@@ -331,7 +299,6 @@ func (r *Renderer) RenderFrame(time float64, frameCount int32, mouseData [4]floa
 	gl.BindFramebuffer(gl.FRAMEBUFFER, 0)
 }
 
-// Run starts the main interactive render loop.
 func (r *Renderer) Run() {
 	startTime := r.context.Time()
 	var frameCount int32 = 0
@@ -340,39 +307,30 @@ func (r *Renderer) Run() {
 
 	for !r.context.ShouldClose() {
 		currentTime := r.context.Time() - startTime
-
-		// Handle mouse input
 		var mouseData [4]float32
 		win := r.context.Window()
 		if win != nil {
 			fbWidth, fbHeight := r.context.GetFramebufferSize()
 			winWidth, winHeight := win.GetSize()
-
 			var scaleX, scaleY float64 = 1.0, 1.0
 			if winWidth > 0 && winHeight > 0 {
 				scaleX = float64(fbWidth) / float64(winWidth)
 				scaleY = float64(fbHeight) / float64(winHeight)
 			}
-
 			cursorX, cursorY := win.GetCursorPos()
 			pixelX := cursorX * scaleX
 			pixelY := cursorY * scaleY
-
 			mouseX := float32(pixelX)
 			mouseY := float32(fbHeight) - float32(pixelY)
-
 			const mouseLeft = 0
 			isMouseDown := win.GetMouseButton(mouseLeft) == 1
-
 			if isMouseDown && !mouseWasDown {
 				lastMouseClickX = pixelX
 				lastMouseClickY = pixelY
 			}
 			mouseWasDown = isMouseDown
-
 			clickX := float32(lastMouseClickX)
 			clickY := float32(fbHeight) - float32(lastMouseClickY)
-
 			if !isMouseDown {
 				clickX = -clickX
 				clickY = -clickY
@@ -382,7 +340,6 @@ func (r *Renderer) Run() {
 
 		r.RenderFrame(currentTime, frameCount, mouseData)
 
-		// Blit the offscreen texture to the screen
 		fbWidth, fbHeight := r.context.GetFramebufferSize()
 		gl.Viewport(0, 0, int32(fbWidth), int32(fbHeight))
 		gl.Clear(gl.COLOR_BUFFER_BIT)
@@ -398,9 +355,78 @@ func (r *Renderer) Run() {
 	}
 }
 
-// RunOffscreen is intended for rendering without a window.
-func (r *Renderer) RunOffscreen() {
-	// TODO: Implement offscreen rendering logic.
+func (r *Renderer) RunOffscreen(duration float64, fps int, outputFile string) error {
+	width, height := r.context.GetFramebufferSize()
+
+	pipeReader, pipeWriter := io.Pipe()
+
+	ffmpegCmd := ffmpeg.Input("pipe:",
+		ffmpeg.KwArgs{
+			"format":  "rawvideo",
+			"pix_fmt": "rgba",
+			"s":       fmt.Sprintf("%dx%d", width, height),
+			"r":       fmt.Sprintf("%d", fps),
+		},
+	).Output(outputFile,
+		ffmpeg.KwArgs{
+			"c:v":     "libx264",
+			"preset":  "ultrafast",
+			"pix_fmt": "yuv420p",
+		},
+	).OverWriteOutput().WithInput(pipeReader) //.ErrorToStdOut() <- uncomment for ffmpeg debug output
+
+	errc := make(chan error, 1)
+	go func() {
+		errc <- ffmpegCmd.Run()
+	}()
+
+	totalFrames := int(duration * float64(fps))
+	timeStep := 1.0 / float64(fps)
+	startTime := time.Now()
+
+	for i := 0; i < totalFrames; i++ {
+		// Print progress to the console
+		fmt.Printf("\rRendering frame %d of %d", i+1, totalFrames)
+
+		currentTime := float64(i) * timeStep
+		r.RenderFrame(currentTime, int32(i), [4]float32{0, 0, 0, 0})
+
+		pixels, err := r.readPixels()
+		if err != nil {
+			pipeWriter.Close()
+			return fmt.Errorf("failed to read pixels for frame %d: %w", i, err)
+		}
+
+		// Vertically flip the image and write to the pipe
+		rowSize := width * 4
+		for y := height - 1; y >= 0; y-- {
+			start := y * rowSize
+			end := start + rowSize
+			if _, err := pipeWriter.Write(pixels[start:end]); err != nil {
+				return fmt.Errorf("failed to write frame %d to pipe: %w", i, err)
+			}
+		}
+	}
+
+	// Calculate and print the final performance stats
+	elapsed := time.Since(startTime).Seconds()
+	avgFPS := float64(totalFrames) / elapsed
+	fmt.Printf("\nFinished rendering %d frames in %.2f seconds (Avg: %.2f FPS)\n", totalFrames, elapsed, avgFPS)
+
+	pipeWriter.Close()
+	return <-errc
+}
+
+func (r *Renderer) readPixels() ([]byte, error) {
+	width, height := r.offscreenRenderer.width, r.offscreenRenderer.height
+	size := width * height * 4
+	pixels := make([]byte, size)
+
+	gl.BindFramebuffer(gl.FRAMEBUFFER, r.offscreenRenderer.fbo)
+	gl.ReadPixels(0, 0, int32(width), int32(height), gl.RGBA, gl.UNSIGNED_BYTE, gl.Ptr(pixels))
+	gl.BindFramebuffer(gl.FRAMEBUFFER, 0)
+
+	return pixels, nil
 }
 
 func updateUniforms(pass *RenderPass, width, height int, uniforms *inputs.Uniforms) {
@@ -446,6 +472,7 @@ func bindChannels(pass *RenderPass, uniforms *inputs.Uniforms) {
 		}
 	}
 }
+
 func unbindChannels(pass *RenderPass) {
 	for chIndex, ch := range pass.channels {
 		if ch != nil {
@@ -464,7 +491,6 @@ func unbindChannels(pass *RenderPass) {
 	}
 }
 
-// newProgram compiles and links the GLSL shaders.
 func newProgram(vertexShaderSource, fragmentShaderSource string) (uint32, error) {
 	vertexShader, err := compileShader(vertexShaderSource, gl.VERTEX_SHADER)
 	if err != nil {
@@ -496,7 +522,6 @@ func newProgram(vertexShaderSource, fragmentShaderSource string) (uint32, error)
 	return program, nil
 }
 
-// compileShader handles compilation of a single shader.
 func compileShader(source string, shaderType uint32) (uint32, error) {
 	shader := gl.CreateShader(shaderType)
 	csources, free := gl.Strs(source + "\x00")

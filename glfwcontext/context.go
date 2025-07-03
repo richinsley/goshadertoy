@@ -14,8 +14,7 @@ type Context struct {
 }
 
 // New creates and initializes a new GLFW context and window.
-func NewContext() (*Context, error) {
-	// All GLFW calls that can only run on the main thread are here.
+func New(width, height int, visible bool) (*Context, error) {
 	runtime.LockOSThread()
 
 	if err := glfw.Init(); err != nil {
@@ -26,9 +25,14 @@ func NewContext() (*Context, error) {
 	glfw.WindowHint(glfw.ContextVersionMinor, 1)
 	glfw.WindowHint(glfw.OpenGLProfile, glfw.OpenGLCoreProfile)
 	glfw.WindowHint(glfw.OpenGLForwardCompatible, glfw.True)
-	glfw.WindowHint(glfw.Resizable, glfw.True)
 
-	win, err := glfw.CreateWindow(1280, 720, "goshadertoy", nil, nil)
+	if visible {
+		glfw.WindowHint(glfw.Resizable, glfw.True)
+	} else {
+		glfw.WindowHint(glfw.Visible, glfw.False)
+	}
+
+	win, err := glfw.CreateWindow(width, height, "goshadertoy", nil, nil)
 	if err != nil {
 		glfw.Terminate()
 		return nil, err
@@ -36,7 +40,6 @@ func NewContext() (*Context, error) {
 
 	win.MakeContextCurrent()
 
-	// gl.Init also needs to be called after a context is made current.
 	if err := gl.Init(); err != nil {
 		return nil, err
 	}

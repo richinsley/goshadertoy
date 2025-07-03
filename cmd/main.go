@@ -11,9 +11,10 @@ import (
 	renderer "github.com/richinsley/goshadertoy/renderer"
 )
 
-func runShadertoy(shaderArgs *api.ShaderArgs) {
+func runShadertoy(shaderArgs *api.ShaderArgs, record bool, duration float64, fps int, width int, height int, outputFile string) {
 	// Initialize renderer
-	r, err := renderer.NewRenderer()
+	// If recording, the window will be hidden (headless mode)
+	r, err := renderer.NewRenderer(width, height, !record)
 	if err != nil {
 		log.Fatalf("Failed to create renderer: %v", err)
 	}
@@ -25,9 +26,19 @@ func runShadertoy(shaderArgs *api.ShaderArgs) {
 		log.Fatalf("Failed to initialize scene: %v", err)
 	}
 
-	// Start the render loop
-	log.Println("Starting render loop...")
-	r.Run()
+	if record {
+		// Start the offscreen render loop
+		log.Println("Starting offscreen render loop...")
+		err = r.RunOffscreen(duration, fps, outputFile)
+		if err != nil {
+			log.Fatalf("Offscreen rendering failed: %v", err)
+		}
+		log.Printf("Successfully rendered to %s", outputFile)
+	} else {
+		// Start the interactive render loop
+		log.Println("Starting interactive render loop...")
+		r.Run()
+	}
 }
 
 func init() {
@@ -35,16 +46,23 @@ func init() {
 }
 
 func main() {
-	// do this in init() for now
-	// runtime.LockOSThread()
-
+	// Command-line flags
 	var apikey = flag.String("apikey", "", "Shadertoy API key (from SHADERTOY_KEY env var if not set)")
-	var shaderID = flag.String("shader", "XlSSzV", "Shadertoy shader ID (e.g., 'Another Cloudy Tunnel 2')") // Default to one with an image
+	var shaderID = flag.String("shader", "XlSSzV", "Shadertoy shader ID")
 	var help = flag.Bool("help", false, "Show help message")
+
+	// Recording flags
+	var record = flag.Bool("record", false, "Enable recording mode")
+	var duration = flag.Float64("duration", 10.0, "Duration to record in seconds")
+	var fps = flag.Int("fps", 60, "Frames per second for recording")
+	var width = flag.Int("width", 1280, "Width of the output")
+	var height = flag.Int("height", 720, "Height of the output")
+	var outputFile = flag.String("output", "output.mp4", "Output file name for recording")
+
 	flag.Parse()
 
 	if *help {
-		fmt.Println("Shadertoy Shader Viewer (GLFW+go-gl version)")
+		fmt.Println("Shadertoy Shader Viewer/Recorder")
 		flag.PrintDefaults()
 		return
 	}
@@ -70,5 +88,5 @@ func main() {
 		log.Println("Warning: Shader arguments may be incomplete (e.g., missing textures or unsupported inputs).")
 	}
 
-	runShadertoy(shaderArgs)
+	runShadertoy(shaderArgs, *record, *duration, *fps, *width, *height, *outputFile)
 }
