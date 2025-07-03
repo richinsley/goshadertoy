@@ -111,21 +111,32 @@ func (b *Buffer) Resize(width, height int) {
 
 // Method to update texture parameters for both textures in the buffer
 func (b *Buffer) UpdateTextureParameters(wrap, filter string, sampler api.Sampler) {
+	// Only proceed if there's an actual change.
 	if wrap == b.wrap && filter == b.filter {
-		// No change in parameters, nothing to do
 		return
 	}
+
 	minFilter, magFilter := getFilterMode(sampler.Filter)
 	wrapmode := getWrapMode(sampler.Wrap)
+
 	for i := 0; i < 2; i++ {
 		gl.BindTexture(gl.TEXTURE_2D, b.textureID[i])
 		gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, minFilter)
 		gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, magFilter)
 		gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, wrapmode)
 		gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, wrapmode)
+
+		// We must explicitly generate the mipmaps for the buffer texture.
+		if sampler.Filter == "mipmap" {
+			gl.GenerateMipmap(gl.TEXTURE_2D)
+		}
 	}
 	// Unbind to clean up
 	gl.BindTexture(gl.TEXTURE_2D, 0)
+
+	// Update the buffer's stored parameters after successfully applying them.
+	b.wrap = sampler.Wrap
+	b.filter = sampler.Filter
 }
 
 // --- IChannel Interface Implementation ---
