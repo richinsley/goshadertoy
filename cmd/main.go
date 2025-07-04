@@ -11,7 +11,7 @@ import (
 	renderer "github.com/richinsley/goshadertoy/renderer"
 )
 
-func runShadertoy(shaderArgs *api.ShaderArgs, record bool, duration float64, fps int, width int, height int, outputFile string) {
+func runShadertoy(shaderArgs *api.ShaderArgs, record bool, duration float64, fps int, width int, height int, outputFile string, ffmpegPath string) {
 	// Initialize renderer
 	// If recording, the window will be hidden (headless mode)
 	r, err := renderer.NewRenderer(width, height, !record)
@@ -29,7 +29,7 @@ func runShadertoy(shaderArgs *api.ShaderArgs, record bool, duration float64, fps
 	if record {
 		// Start the offscreen render loop
 		log.Println("Starting offscreen render loop...")
-		err = r.RunOffscreen(width, height, duration, fps, outputFile) // New call with width and height
+		err = r.RunOffscreen(width, height, duration, fps, outputFile, ffmpegPath) // New call with width and height
 		if err != nil {
 			log.Fatalf("Offscreen rendering failed: %v", err)
 		}
@@ -58,6 +58,7 @@ func main() {
 	var width = flag.Int("width", 1280, "Width of the output")
 	var height = flag.Int("height", 720, "Height of the output")
 	var outputFile = flag.String("output", "output.mp4", "Output file name for recording")
+	var ffmpegPath = flag.String("ffmpeg", "", "Path to ffmpeg executable")
 
 	flag.Parse()
 
@@ -88,5 +89,5 @@ func main() {
 		log.Println("Warning: Shader arguments may be incomplete (e.g., missing textures or unsupported inputs).")
 	}
 
-	runShadertoy(shaderArgs, *record, *duration, *fps, *width, *height, *outputFile)
+	runShadertoy(shaderArgs, *record, *duration, *fps, *width, *height, *outputFile, *ffmpegPath)
 }

@@ -45,7 +45,7 @@ func (or *OffscreenRenderer) Destroy() {
 	gl.DeleteTextures(1, &or.textureID)
 }
 
-func (r *Renderer) RunOffscreen(width, height int, duration float64, fps int, outputFile string) error {
+func (r *Renderer) RunOffscreen(width, height int, duration float64, fps int, outputFile string, ffmpegPath string) error {
 	pipeReader, pipeWriter := io.Pipe()
 
 	ffmpegCmd := ffmpeg.Input("pipe:",
@@ -57,12 +57,17 @@ func (r *Renderer) RunOffscreen(width, height int, duration float64, fps int, ou
 		},
 	).Output(outputFile,
 		ffmpeg.KwArgs{
-			// "c:v":     "libx264",
-			// "preset":  "ultrafast",
-			"c:v":     "h264_videotoolbox",
+			"c:v":    "libx264",
+			"preset": "ultrafast",
+			// "c:v":     "h264_videotoolbox",
 			"pix_fmt": "yuv420p",
 		},
 	).OverWriteOutput().WithInput(pipeReader).ErrorToStdOut() // <- uncomment for ffmpeg debug output
+
+	// If ffmpegPath is provided, set it, otherwise it will use the default ffmpeg binary in PATH
+	if ffmpegPath != "" {
+		ffmpegCmd = ffmpegCmd.SetFfmpegPath(ffmpegPath)
+	}
 
 	errc := make(chan error, 1)
 	go func() {
