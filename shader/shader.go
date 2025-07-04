@@ -16,6 +16,18 @@ void main() {
 }
 `
 
+// The blit fragment shader is used to copy a texture to the screen.
+const blitFragmentShaderSourceFlip = `#version 410 core
+in vec2 frag_uv;
+out vec4 fragColor;
+uniform sampler2D u_texture;
+
+void main() {
+    // Flip the y-coordinate by subtracting it from 1.0
+    fragColor = texture(u_texture, vec2(frag_uv.x, 1.0 - frag_uv.y));
+}
+`
+
 const blitFragmentShaderSource = `#version 410 core
 in vec2 frag_uv;
 out vec4 fragColor;
@@ -30,7 +42,10 @@ func GenerateVertexShader() string {
 	return vertexShaderSource
 }
 
-func GetBlitFragmentShader() string {
+func GetBlitFragmentShader(flip bool) string {
+	if flip {
+		return blitFragmentShaderSourceFlip
+	}
 	return blitFragmentShaderSource
 }
 

@@ -186,7 +186,7 @@ func (r *Renderer) InitScene(shaderArgs *api.ShaderArgs) error {
 	gl.BindBuffer(gl.ARRAY_BUFFER, 0)
 	gl.BindVertexArray(0)
 
-	r.blitProgram, err = newProgram(shader.GenerateVertexShader(), shader.GetBlitFragmentShader())
+	r.blitProgram, err = newProgram(shader.GenerateVertexShader(), shader.GetBlitFragmentShader(r.recordMode))
 	if err != nil {
 		return fmt.Errorf("failed to create blit program: %w", err)
 	}

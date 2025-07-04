@@ -91,14 +91,10 @@ func (r *Renderer) RunOffscreen(width, height int, duration float64, fps int, ou
 			return fmt.Errorf("failed to read pixels for frame %d: %w", i, err)
 		}
 
-		// Vertically flip the image and write to the pipe
-		rowSize := width * 4
-		for y := height - 1; y >= 0; y-- {
-			start := y * rowSize
-			end := start + rowSize
-			if _, err := pipeWriter.Write(pixels[start:end]); err != nil {
-				return fmt.Errorf("failed to write frame %d to pipe: %w", i, err)
-			}
+		// Write the pixels directly to the pipe,
+		// it shoould have been
+		if _, err := pipeWriter.Write(pixels); err != nil {
+			return fmt.Errorf("failed to write frame %d to pipe: %w", i, err)
 		}
 	}
 

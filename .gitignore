@@ -31,4 +31,5 @@ go.work.sum
 # .idea/
 # .vscode/
 output.mp4
+output.mov
 goshadertoy
