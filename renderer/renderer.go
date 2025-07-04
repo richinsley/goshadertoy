@@ -40,7 +40,7 @@ type Renderer struct {
 	recordMode        bool
 }
 
-func NewRenderer(width, height int, visible bool) (*Renderer, error) {
+func NewRenderer(width, height int, visible bool, bitDepth int) (*Renderer, error) {
 	r := &Renderer{
 		width:      width,
 		height:     height,
@@ -58,7 +58,7 @@ func NewRenderer(width, height int, visible bool) (*Renderer, error) {
 	}
 
 	// Use the stored width and height to create the offscreen renderer
-	r.offscreenRenderer, err = NewOffscreenRenderer(r.width, r.height)
+	r.offscreenRenderer, err = NewOffscreenRenderer(r.width, r.height, bitDepth)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create offscreen renderer: %w", err)
 	}

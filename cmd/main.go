@@ -1,3 +1,4 @@
+// richinsley/goshadertoy/goshadertoy-5ec5c80e8130811a9646c9bd6d1bbcbd07e1bb4d/cmd/main.go
 package main
 
 import (
@@ -11,10 +12,10 @@ import (
 	renderer "github.com/richinsley/goshadertoy/renderer"
 )
 
-func runShadertoy(shaderArgs *api.ShaderArgs, record bool, duration float64, fps int, width int, height int, outputFile string, ffmpegPath string) {
+func runShadertoy(shaderArgs *api.ShaderArgs, options *renderer.ShaderOptions) {
 	// Initialize renderer
 	// If recording, the window will be hidden (headless mode)
-	r, err := renderer.NewRenderer(width, height, !record)
+	r, err := renderer.NewRenderer(*options.Width, *options.Height, !*options.Record, *options.BitDepth)
 	if err != nil {
 		log.Fatalf("Failed to create renderer: %v", err)
 	}
@@ -26,14 +27,14 @@ func runShadertoy(shaderArgs *api.ShaderArgs, record bool, duration float64, fps
 		log.Fatalf("Failed to initialize scene: %v", err)
 	}
 
-	if record {
+	if *options.Record {
 		// Start the offscreen render loop
 		log.Println("Starting offscreen render loop...")
-		err = r.RunOffscreen(width, height, duration, fps, outputFile, ffmpegPath) // New call with width and height
+		err = r.RunOffscreen(options)
 		if err != nil {
 			log.Fatalf("Offscreen rendering failed: %v", err)
 		}
-		log.Printf("Successfully rendered to %s", outputFile)
+		log.Printf("Successfully rendered to %s", *options.OutputFile)
 	} else {
 		// Start the interactive render loop
 		log.Println("Starting interactive render loop...")
@@ -47,34 +48,36 @@ func init() {
 
 func main() {
 	// Command-line flags
-	var apikey = flag.String("apikey", "", "Shadertoy API key (from SHADERTOY_KEY env var if not set)")
-	var shaderID = flag.String("shader", "XlSSzV", "Shadertoy shader ID")
-	var help = flag.Bool("help", false, "Show help message")
+	options := &renderer.ShaderOptions{}
+	options.APIKey = flag.String("apikey", "", "Shadertoy API key (from SHADERTOY_KEY env var if not set)")
+	options.ShaderID = flag.String("shader", "XlSSzV", "Shadertoy shader ID")
+	options.Help = flag.Bool("help", false, "Show help message")
 
 	// Recording flags
-	var record = flag.Bool("record", false, "Enable recording mode")
-	var duration = flag.Float64("duration", 10.0, "Duration to record in seconds")
-	var fps = flag.Int("fps", 60, "Frames per second for recording")
-	var width = flag.Int("width", 1280, "Width of the output")
-	var height = flag.Int("height", 720, "Height of the output")
-	var outputFile = flag.String("output", "output.mp4", "Output file name for recording")
-	var ffmpegPath = flag.String("ffmpeg", "", "Path to ffmpeg executable")
+	options.Record = flag.Bool("record", false, "Enable recording mode")
+	options.Duration = flag.Float64("duration", 10.0, "Duration to record in seconds")
+	options.FPS = flag.Int("fps", 60, "Frames per second for recording")
+	options.Width = flag.Int("width", 1280, "Width of the output")
+	options.Height = flag.Int("height", 720, "Height of the output")
+	options.BitDepth = flag.Int("bitdepth", 8, "Bit depth for recording (8, 10, or 12)")
+	options.OutputFile = flag.String("output", "output.mp4", "Output file name for recording")
+	options.FFMPEGPath = flag.String("ffmpeg", "", "Path to ffmpeg executable")
 
 	flag.Parse()
 
-	if *help {
+	if *options.Help {
 		fmt.Println("Shadertoy Shader Viewer/Recorder")
 		flag.PrintDefaults()
 		return
 	}
 
-	finalAPIKey := *apikey
+	finalAPIKey := *options.APIKey
 	if finalAPIKey == "" {
 		finalAPIKey = os.Getenv("SHADERTOY_KEY")
 	}
 
-	log.Printf("Fetching shader with ID: %s", *shaderID)
-	shaderJSON, err := api.ShaderFromID(finalAPIKey, *shaderID, true)
+	log.Printf("Fetching shader with ID: %s", *options.ShaderID)
+	shaderJSON, err := api.ShaderFromID(finalAPIKey, *options.ShaderID, true)
 	if err != nil {
 		log.Fatalf("Error fetching shader from ID: %v", err)
 	}
@@ -89,5 +92,5 @@ func main() {
 		log.Println("Warning: Shader arguments may be incomplete (e.g., missing textures or unsupported inputs).")
 	}
 
-	runShadertoy(shaderArgs, *record, *duration, *fps, *width, *height, *outputFile, *ffmpegPath)
+	runShadertoy(shaderArgs, options)
 }
