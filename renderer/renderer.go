@@ -222,23 +222,6 @@ func (r *Renderer) InitScene(shaderArgs *api.ShaderArgs) error {
 }
 
 func (r *Renderer) RenderFrame(time float64, frameCount int32, mouseData [4]float32) {
-	// fbWidth, fbHeight := r.context.GetFramebufferSize()
-	// if fbWidth != r.offscreenRenderer.width || fbHeight != r.offscreenRenderer.height {
-	// 	for _, buffer := range r.buffers {
-	// 		buffer.Resize(fbWidth, fbHeight)
-	// 	}
-	// 	gl.BindTexture(gl.TEXTURE_2D, r.offscreenRenderer.textureID)
-	// 	gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, int32(fbWidth), int32(fbHeight), 0, gl.RGBA, gl.FLOAT, nil)
-	// 	r.offscreenRenderer.width = fbWidth
-	// 	r.offscreenRenderer.height = fbHeight
-	// }
-
-	// uniforms := &inputs.Uniforms{
-	// 	Time:  float32(time),
-	// 	Mouse: mouseData,
-	// 	Frame: frameCount,
-	// }
-
 	var renderWidth, renderHeight int
 
 	if r.recordMode {
