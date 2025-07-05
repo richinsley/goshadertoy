@@ -59,12 +59,16 @@ precision mediump sampler3D;
 // it's 2025, so this is always 1
 #define HW_PERFORMANCE 1
 
-uniform vec3 iResolution;
-uniform float iTime;
-uniform vec4 iMouse;
-uniform vec3 iChannelResolution[4];
-uniform int iFrame;
-uniform vec4 iDate;
+uniform vec3      iResolution;           // viewport resolution (in pixels)
+uniform float     iTime;                 // shader playback time (in seconds)
+uniform float     iTimeDelta;            // render time (in seconds)
+uniform float     iFrameRate;            // shader frame rate
+uniform int       iFrame;                // shader playback frame
+uniform float     iChannelTime[4];       // channel playback time (in seconds)
+uniform vec3      iChannelResolution[4]; // channel resolution (in pixels)
+uniform vec4      iMouse;                // mouse pixel coords. xy: current (if MLB down), zw: click
+uniform vec4      iDate;                 // (year, month, day, time in seconds)
+uniform float     iSampleRate;           // sound sample rate (i.e., 44100)
 `
 	// Dynamically declare iChannel samplers based on their type
 	channelDecls := ""

@@ -159,3 +159,8 @@ func hanningWindow(size int) []float64 {
 	}
 	return window
 }
+
+// SampleRate returns the sample rate of the audio device.
+func (c *MicChannel) SampleRate() int {
+	return c.audioDevice.SampleRate()
+}

@@ -2,10 +2,14 @@ package inputs
 
 // Uniforms holds the global shader values that dynamic channels might need.
 type Uniforms struct {
-	Time  float32
-	Mouse [4]float32
-	Frame int32 // Frame count for animations or effects
-	// Add other uniforms like Date, Frame, etc., as needed.
+	Time              float32
+	Mouse             [4]float32
+	Frame             int32 // Frame count for animations or effects
+	TimeDelta         float32
+	FrameRate         float32
+	ChannelTime       [4]float32
+	SampleRate        float32
+	ChannelResolution [4][3]float32
 }
 
 // IChannel defines the contract for any Shadertoy input channel (iChannel0-3).

@@ -17,31 +17,20 @@ import (
 var translator *gst.ShaderTranslator
 
 type RenderPass struct {
-	/*
-		Shader Inputs
-		uniform vec3      iResolution;           // viewport resolution (in pixels)
-		uniform float     iTime;                 // shader playback time (in seconds)
-		uniform float     iTimeDelta;            // render time (in seconds)
-		uniform float     iFrameRate;            // shader frame rate
-		uniform int       iFrame;                // shader playback frame
-		uniform float     iChannelTime[4];       // channel playback time (in seconds)
-		uniform vec3      iChannelResolution[4]; // channel resolution (in pixels)
-		uniform vec4      iMouse;                // mouse pixel coords. xy: current (if MLB down), zw: click
-		uniform samplerXX iChannel0..3;          // input channel. XX = 2D/Cube
-		uniform vec4      iDate;                 // (year, month, day, time in seconds)
-		uniform float     iSampleRate;           // sound sample rate (i.e., 44100)
-	*/
 	shaderProgram         uint32
 	channels              []inputs.IChannel
-	buffer                *inputs.Buffer // The buffer this pass renders to (if any)
+	buffer                *inputs.Buffer
 	resolutionLoc         int32
 	timeLoc               int32
 	mouseLoc              int32
 	frameLoc              int32
 	iChannelLoc           [4]int32
-	iChannelResolutionLoc [4]int32
+	iChannelResolutionLoc int32
 	iDateLoc              int32
 	iSampleRateLoc        int32
+	iTimeDeltaLoc         int32
+	iFrameRateLoc         int32
+	iChannelTimeLoc       int32
 }
 
 type Renderer struct {
@@ -61,7 +50,7 @@ func NewRenderer(width, height int, visible bool, bitDepth int) (*Renderer, erro
 	r := &Renderer{
 		width:      width,
 		height:     height,
-		recordMode: !visible, // Set recordMode based on window visibility
+		recordMode: !visible,
 	}
 	var err error
 
@@ -74,7 +63,6 @@ func NewRenderer(width, height int, visible bool, bitDepth int) (*Renderer, erro
 		return nil, fmt.Errorf("failed to initialize glfw context: %w", err)
 	}
 
-	// Use the stored width and height to create the offscreen renderer
 	r.offscreenRenderer, err = NewOffscreenRenderer(r.width, r.height, bitDepth)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create offscreen renderer: %w", err)
@@ -167,17 +155,24 @@ func (r *Renderer) GetRenderPass(name string, shaderArgs *api.ShaderArgs) (*Rend
 	retv.frameLoc = r.GetUniformLocation(uniformMap, retv.shaderProgram, "iFrame")
 	retv.iDateLoc = r.GetUniformLocation(uniformMap, retv.shaderProgram, "iDate")
 	retv.iSampleRateLoc = r.GetUniformLocation(uniformMap, retv.shaderProgram, "iSampleRate")
+	retv.iTimeDeltaLoc = r.GetUniformLocation(uniformMap, retv.shaderProgram, "iTimeDelta")
+	retv.iFrameRateLoc = r.GetUniformLocation(uniformMap, retv.shaderProgram, "iFrameRate")
+
+	retv.iChannelTimeLoc = r.GetUniformLocation(uniformMap, retv.shaderProgram, "iChannelTime[0]")
+	if retv.iChannelTimeLoc < 0 {
+		retv.iChannelTimeLoc = r.GetUniformLocation(uniformMap, retv.shaderProgram, "iChannelTime")
+	}
+
+	retv.iChannelResolutionLoc = r.GetUniformLocation(uniformMap, retv.shaderProgram, "iChannelResolution[0]")
+	if retv.iChannelResolutionLoc < 0 {
+		retv.iChannelResolutionLoc = r.GetUniformLocation(uniformMap, retv.shaderProgram, "iChannelResolution")
+	}
 
 	for i := 0; i < 4; i++ {
 		samplerName := fmt.Sprintf("iChannel%d", i)
-		resolutionName := fmt.Sprintf("iChannelResolution[%d]", i)
 		retv.iChannelLoc[i] = -1
-		retv.iChannelResolutionLoc[i] = -1
 		if v, ok := uniformMap[samplerName]; ok {
 			retv.iChannelLoc[i] = gl.GetUniformLocation(retv.shaderProgram, gl.Str(v.MappedName+"\x00"))
-		}
-		if v, ok := uniformMap[resolutionName]; ok {
-			retv.iChannelResolutionLoc[i] = gl.GetUniformLocation(retv.shaderProgram, gl.Str(v.MappedName+"\x00"))
 		}
 	}
 
@@ -242,20 +237,17 @@ func (r *Renderer) InitScene(shaderArgs *api.ShaderArgs) error {
 	return nil
 }
 
-func (r *Renderer) RenderFrame(time float64, frameCount int32, mouseData [4]float32) {
+func (r *Renderer) RenderFrame(time float64, frameCount int32, mouseData [4]float32, uniforms *inputs.Uniforms) {
 	var renderWidth, renderHeight int
 
 	if r.recordMode {
-		// In record mode, the render size is fixed to the stored dimensions.
 		renderWidth = r.width
 		renderHeight = r.height
 	} else {
-		// In interactive mode, match the window's framebuffer size to allow resizing.
 		fbWidth, fbHeight := r.context.GetFramebufferSize()
 		renderWidth = fbWidth
 		renderHeight = fbHeight
 
-		// Resize all resources if the window size changed.
 		if fbWidth != r.offscreenRenderer.width || fbHeight != r.offscreenRenderer.height {
 			r.offscreenRenderer.width = fbWidth
 			r.offscreenRenderer.height = fbHeight
@@ -266,12 +258,6 @@ func (r *Renderer) RenderFrame(time float64, frameCount int32, mouseData [4]floa
 				buffer.Resize(fbWidth, fbHeight)
 			}
 		}
-	}
-
-	uniforms := &inputs.Uniforms{
-		Time:  float32(time),
-		Mouse: mouseData,
-		Frame: frameCount,
 	}
 
 	for _, pass := range r.bufferPasses {
@@ -312,9 +298,13 @@ func (r *Renderer) Run() {
 	var frameCount int32 = 0
 	var lastMouseClickX, lastMouseClickY float64
 	var mouseWasDown bool
+	var lastFrameTime = r.context.Time()
 
 	for !r.context.ShouldClose() {
 		currentTime := r.context.Time() - startTime
+		timeDelta := float32(currentTime - lastFrameTime)
+		lastFrameTime = currentTime
+
 		var mouseData [4]float32
 		win := r.context.Window()
 		if win != nil {
@@ -346,7 +336,37 @@ func (r *Renderer) Run() {
 			mouseData = [4]float32{mouseX, mouseY, clickX, clickY}
 		}
 
-		r.RenderFrame(currentTime, frameCount, mouseData)
+		var sampleRate float32 = 44100 // Default
+		var channelResolutions [4][3]float32
+		// We get the resolutions from the 'image' pass channels
+		if imagePass, ok := r.namedPasses["image"]; ok {
+			for i, ch := range imagePass.channels {
+				if ch != nil {
+					channelResolutions[i] = ch.ChannelRes()
+					if mic, ok := ch.(interface{ SampleRate() int }); ok {
+						sampleRate = float32(mic.SampleRate())
+					}
+				}
+			}
+		}
+
+		frameRate := float32(1.0 / timeDelta)
+		if timeDelta == 0 {
+			frameRate = 60.0
+		}
+
+		uniforms := &inputs.Uniforms{
+			Time:              float32(currentTime),
+			TimeDelta:         timeDelta,
+			FrameRate:         frameRate,
+			Frame:             frameCount,
+			Mouse:             mouseData,
+			ChannelTime:       [4]float32{float32(currentTime), float32(currentTime), float32(currentTime), float32(currentTime)},
+			SampleRate:        sampleRate,
+			ChannelResolution: channelResolutions,
+		}
+
+		r.RenderFrame(currentTime, frameCount, mouseData, uniforms)
 
 		fbWidth, fbHeight := r.context.GetFramebufferSize()
 		gl.Viewport(0, 0, int32(fbWidth), int32(fbHeight))
@@ -370,6 +390,12 @@ func updateUniforms(pass *RenderPass, width, height int, uniforms *inputs.Unifor
 	if pass.timeLoc != -1 {
 		gl.Uniform1f(pass.timeLoc, uniforms.Time)
 	}
+	if pass.iTimeDeltaLoc != -1 {
+		gl.Uniform1f(pass.iTimeDeltaLoc, uniforms.TimeDelta)
+	}
+	if pass.iFrameRateLoc != -1 {
+		gl.Uniform1f(pass.iFrameRateLoc, uniforms.FrameRate)
+	}
 	if pass.frameLoc != -1 {
 		gl.Uniform1i(pass.frameLoc, uniforms.Frame)
 	}
@@ -377,15 +403,30 @@ func updateUniforms(pass *RenderPass, width, height int, uniforms *inputs.Unifor
 		gl.Uniform4f(pass.mouseLoc, uniforms.Mouse[0], uniforms.Mouse[1], uniforms.Mouse[2], uniforms.Mouse[3])
 	}
 	if pass.iDateLoc != -1 {
-		// Set the iDate uniform with the current date and time.
-		// Assuming iDate is a vec4 with (year, month, day, time in seconds)
 		now := time.Now()
 		year := float32(now.Year())
 		month := float32(now.Month())
 		day := float32(now.Day())
-		// Time in seconds since start of day (0-86400)
 		timeInSeconds := float32(now.Hour()*3600 + now.Minute()*60 + now.Second())
 		gl.Uniform4f(pass.iDateLoc, year, month, day, timeInSeconds)
+	}
+	if pass.iSampleRateLoc != -1 {
+		gl.Uniform1f(pass.iSampleRateLoc, uniforms.SampleRate)
+	}
+
+	if pass.iChannelTimeLoc != -1 {
+		gl.Uniform1fv(pass.iChannelTimeLoc, 4, &uniforms.ChannelTime[0])
+	}
+
+	if pass.iChannelResolutionLoc != -1 {
+		// We need to flatten the [4][3]float32 array to a single slice for Uniform3fv
+		var res_flat [12]float32
+		for i := 0; i < 4; i++ {
+			res_flat[i*3] = uniforms.ChannelResolution[i][0]
+			res_flat[i*3+1] = uniforms.ChannelResolution[i][1]
+			res_flat[i*3+2] = uniforms.ChannelResolution[i][2]
+		}
+		gl.Uniform3fv(pass.iChannelResolutionLoc, 4, &res_flat[0])
 	}
 }
 
@@ -409,11 +450,6 @@ func bindChannels(pass *RenderPass, uniforms *inputs.Uniforms) {
 			gl.ActiveTexture(gl.TEXTURE0 + uint32(chIndex))
 			gl.BindTexture(texTarget, ch.GetTextureID())
 			gl.Uniform1i(pass.iChannelLoc[chIndex], int32(chIndex))
-		}
-
-		if pass.iChannelResolutionLoc[chIndex] != -1 {
-			res := ch.ChannelRes()
-			gl.Uniform3fv(pass.iChannelResolutionLoc[chIndex], 1, &res[0])
 		}
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/go-gl/gl/v4.1-core/gl"
+	inputs "github.com/richinsley/goshadertoy/inputs"
 	ffmpeg "github.com/u2takey/ffmpeg-go"
 )
 
@@ -134,7 +135,6 @@ func (r *Renderer) RunOffscreen(options *ShaderOptions) error {
 
 	var ffmpegCmd *ffmpeg.Stream
 
-	// Base input arguments for the ffmpeg pipe
 	inputArgs := ffmpeg.KwArgs{
 		"format":  "rawvideo",
 		"pix_fmt": ffmpegInPixFmt,
@@ -144,11 +144,7 @@ func (r *Renderer) RunOffscreen(options *ShaderOptions) error {
 
 	if *options.DecklinkDevice != "" && len(*options.DecklinkDevice) > 0 {
 		log.Printf("Streaming to DeckLink device: %s", *options.DecklinkDevice)
-
-		// Add the -re flag for real-time streaming, critical for DeckLink
 		inputArgs["re"] = ""
-
-		// DeckLink output pipeline
 		ffmpegCmd = ffmpeg.Input("pipe:", inputArgs).
 			Output(*options.DecklinkDevice,
 				ffmpeg.KwArgs{
@@ -159,11 +155,10 @@ func (r *Renderer) RunOffscreen(options *ShaderOptions) error {
 
 	} else {
 		log.Printf("Recording to output file: %s", *options.OutputFile)
-		// Standard file output pipeline
 		ffmpegCmd = ffmpeg.Input("pipe:", inputArgs).
 			Output(*options.OutputFile,
 				ffmpeg.KwArgs{
-					"c:v":     "hevc_videotoolbox", // macos only
+					"c:v":     "hevc_videotoolbox",
 					"b:v":     "25M",
 					"pix_fmt": ffmpegOutPixFmt,
 				},
@@ -183,9 +178,20 @@ func (r *Renderer) RunOffscreen(options *ShaderOptions) error {
 	timeStep := 1.0 / float64(*options.FPS)
 	startTime := time.Now()
 
-	// The first call to readPixelsAsync only *starts* the transfer.
-	// We need to render a dummy frame first to get the PBO pipeline started.
-	r.RenderFrame(0, 0, [4]float32{0, 0, 0, 0})
+	// Dummy uniforms for the first frame
+	dummyUniforms := &inputs.Uniforms{
+		Time:      0,
+		TimeDelta: 0,
+		FrameRate: float32(*options.FPS),
+		Frame:     -1,
+		Mouse:     [4]float32{0, 0, 0, 0},
+		ChannelTime: [4]float32{
+			0, 0, 0, 0,
+		},
+		SampleRate: 44100,
+	}
+
+	r.RenderFrame(0, -1, [4]float32{0, 0, 0, 0}, dummyUniforms)
 	r.offscreenRenderer.readPixelsAsync(*options.Width, *options.Height)
 
 	var i int
@@ -201,21 +207,32 @@ func (r *Renderer) RunOffscreen(options *ShaderOptions) error {
 		}
 
 		currentTime := float64(i) * timeStep
+		timeDelta := float32(timeStep)
 
-		// Render the current frame
-		r.RenderFrame(currentTime, int32(i), [4]float32{0, 0, 0, 0})
+		uniforms := &inputs.Uniforms{
+			Time:      float32(currentTime),
+			TimeDelta: timeDelta,
+			FrameRate: float32(*options.FPS),
+			Frame:     int32(i),
+			Mouse:     [4]float32{0, 0, 0, 0},
+			ChannelTime: [4]float32{
+				float32(currentTime),
+				float32(currentTime),
+				float32(currentTime),
+				float32(currentTime),
+			},
+			SampleRate: 44100,
+		}
 
-		// Read pixels from the *previous* frame while the current one renders.
+		r.RenderFrame(currentTime, int32(i), [4]float32{0, 0, 0, 0}, uniforms)
+
 		pixels, err := r.offscreenRenderer.readPixelsAsync(*options.Width, *options.Height)
 		if err != nil {
 			pipeWriter.Close()
 			return fmt.Errorf("failed to read pixels for frame %d: %w", i, err)
 		}
 
-		// Write the pixel data to the pipe
 		if _, err := pipeWriter.Write(pixels); err != nil {
-			// This can happen if ffmpeg closes the pipe early due to an error.
-			// We'll catch the main error from the ffmpeg goroutine.
 			break
 		}
 
