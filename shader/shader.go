@@ -64,6 +64,7 @@ uniform float iTime;
 uniform vec4 iMouse;
 uniform vec3 iChannelResolution[4];
 uniform int iFrame;
+uniform vec4 iDate;
 `
 	// Dynamically declare iChannel samplers based on their type
 	channelDecls := ""

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/go-gl/gl/v4.1-core/gl"
 	api "github.com/richinsley/goshadertoy/api"
@@ -16,6 +17,20 @@ import (
 var translator *gst.ShaderTranslator
 
 type RenderPass struct {
+	/*
+		Shader Inputs
+		uniform vec3      iResolution;           // viewport resolution (in pixels)
+		uniform float     iTime;                 // shader playback time (in seconds)
+		uniform float     iTimeDelta;            // render time (in seconds)
+		uniform float     iFrameRate;            // shader frame rate
+		uniform int       iFrame;                // shader playback frame
+		uniform float     iChannelTime[4];       // channel playback time (in seconds)
+		uniform vec3      iChannelResolution[4]; // channel resolution (in pixels)
+		uniform vec4      iMouse;                // mouse pixel coords. xy: current (if MLB down), zw: click
+		uniform samplerXX iChannel0..3;          // input channel. XX = 2D/Cube
+		uniform vec4      iDate;                 // (year, month, day, time in seconds)
+		uniform float     iSampleRate;           // sound sample rate (i.e., 44100)
+	*/
 	shaderProgram         uint32
 	channels              []inputs.IChannel
 	buffer                *inputs.Buffer // The buffer this pass renders to (if any)
@@ -25,6 +40,8 @@ type RenderPass struct {
 	frameLoc              int32
 	iChannelLoc           [4]int32
 	iChannelResolutionLoc [4]int32
+	iDateLoc              int32
+	iSampleRateLoc        int32
 }
 
 type Renderer struct {
@@ -93,6 +110,17 @@ var quadVertices = []float32{
 	-1.0, 1.0, 1.0, -1.0, 1.0, 1.0,
 }
 
+func (r *Renderer) GetUniformLocation(uniformMap map[string]gst.ShaderVariable, shaderProgram uint32, name string) int32 {
+	if v, ok := uniformMap[name]; ok {
+		loc := gl.GetUniformLocation(shaderProgram, gl.Str(v.MappedName+"\x00"))
+		if loc < 0 {
+			return -1
+		}
+		return loc
+	}
+	return -1
+}
+
 func (r *Renderer) GetRenderPass(name string, shaderArgs *api.ShaderArgs) (*RenderPass, error) {
 	if name == "" {
 		name = "image"
@@ -133,22 +161,12 @@ func (r *Renderer) GetRenderPass(name string, shaderArgs *api.ShaderArgs) (*Rend
 	uniformMap := fsShader.Variables
 	gl.UseProgram(retv.shaderProgram)
 
-	retv.resolutionLoc = -1
-	retv.timeLoc = -1
-	retv.mouseLoc = -1
-	retv.frameLoc = -1
-	if v, ok := uniformMap["iResolution"]; ok {
-		retv.resolutionLoc = gl.GetUniformLocation(retv.shaderProgram, gl.Str(v.MappedName+"\x00"))
-	}
-	if v, ok := uniformMap["iTime"]; ok {
-		retv.timeLoc = gl.GetUniformLocation(retv.shaderProgram, gl.Str(v.MappedName+"\x00"))
-	}
-	if v, ok := uniformMap["iMouse"]; ok {
-		retv.mouseLoc = gl.GetUniformLocation(retv.shaderProgram, gl.Str(v.MappedName+"\x00"))
-	}
-	if v, ok := uniformMap["iFrame"]; ok {
-		retv.frameLoc = gl.GetUniformLocation(retv.shaderProgram, gl.Str(v.MappedName+"\x00"))
-	}
+	retv.resolutionLoc = r.GetUniformLocation(uniformMap, retv.shaderProgram, "iResolution")
+	retv.timeLoc = r.GetUniformLocation(uniformMap, retv.shaderProgram, "iTime")
+	retv.mouseLoc = r.GetUniformLocation(uniformMap, retv.shaderProgram, "iMouse")
+	retv.frameLoc = r.GetUniformLocation(uniformMap, retv.shaderProgram, "iFrame")
+	retv.iDateLoc = r.GetUniformLocation(uniformMap, retv.shaderProgram, "iDate")
+	retv.iSampleRateLoc = r.GetUniformLocation(uniformMap, retv.shaderProgram, "iSampleRate")
 
 	for i := 0; i < 4; i++ {
 		samplerName := fmt.Sprintf("iChannel%d", i)
@@ -211,7 +229,10 @@ func (r *Renderer) InitScene(shaderArgs *api.ShaderArgs) error {
 	for _, name := range passnames {
 		pass, err := r.GetRenderPass(name, shaderArgs)
 		if err != nil {
-			continue
+			if strings.HasPrefix(err.Error(), "no render pass found with name") {
+				continue
+			}
+			return fmt.Errorf("failed to create render pass %s: %v", name, err)
 		}
 		r.namedPasses[name] = pass
 		if name != "image" {
@@ -354,6 +375,17 @@ func updateUniforms(pass *RenderPass, width, height int, uniforms *inputs.Unifor
 	}
 	if pass.mouseLoc != -1 {
 		gl.Uniform4f(pass.mouseLoc, uniforms.Mouse[0], uniforms.Mouse[1], uniforms.Mouse[2], uniforms.Mouse[3])
+	}
+	if pass.iDateLoc != -1 {
+		// Set the iDate uniform with the current date and time.
+		// Assuming iDate is a vec4 with (year, month, day, time in seconds)
+		now := time.Now()
+		year := float32(now.Year())
+		month := float32(now.Month())
+		day := float32(now.Day())
+		// Time in seconds since start of day (0-86400)
+		timeInSeconds := float32(now.Hour()*3600 + now.Minute()*60 + now.Second())
+		gl.Uniform4f(pass.iDateLoc, year, month, day, timeInSeconds)
 	}
 }
 

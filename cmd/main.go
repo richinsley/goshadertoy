@@ -62,6 +62,7 @@ func main() {
 	options.BitDepth = flag.Int("bitdepth", 8, "Bit depth for recording (8, 10, or 12)")
 	options.OutputFile = flag.String("output", "output.mp4", "Output file name for recording")
 	options.FFMPEGPath = flag.String("ffmpeg", "", "Path to ffmpeg executable")
+	options.DecklinkDevice = flag.String("decklink", "", "DeckLink device name for output")
 
 	flag.Parse()
 

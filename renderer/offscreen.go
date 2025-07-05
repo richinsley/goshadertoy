@@ -1,9 +1,9 @@
-// richinsley/goshadertoy/goshadertoy-5ec5c80e8130811a9646c9bd6d1bbcbd07e1bb4d/renderer/offscreen.go
 package renderer
 
 import (
 	"fmt"
 	"io"
+	"log"
 	"time"
 
 	"github.com/go-gl/gl/v4.1-core/gl"
@@ -132,20 +132,43 @@ func (r *Renderer) RunOffscreen(options *ShaderOptions) error {
 
 	_, _, _, ffmpegInPixFmt, ffmpegOutPixFmt := getFormatForBitDepth(*options.BitDepth)
 
-	ffmpegCmd := ffmpeg.Input("pipe:",
-		ffmpeg.KwArgs{
-			"format":  "rawvideo",
-			"pix_fmt": ffmpegInPixFmt,
-			"s":       fmt.Sprintf("%dx%d", *options.Width, *options.Height),
-			"r":       fmt.Sprintf("%d", *options.FPS),
-		},
-	).Output(*options.OutputFile,
-		ffmpeg.KwArgs{
-			"c:v":     "hevc_videotoolbox", // macos only
-			"b:v":     "25M",               // bitrate for 4K
-			"pix_fmt": ffmpegOutPixFmt,     // Use the user-specified output format
-		},
-	).OverWriteOutput().WithInput(pipeReader).ErrorToStdOut()
+	var ffmpegCmd *ffmpeg.Stream
+
+	// Base input arguments for the ffmpeg pipe
+	inputArgs := ffmpeg.KwArgs{
+		"format":  "rawvideo",
+		"pix_fmt": ffmpegInPixFmt,
+		"s":       fmt.Sprintf("%dx%d", *options.Width, *options.Height),
+		"r":       fmt.Sprintf("%d", *options.FPS),
+	}
+
+	if *options.DecklinkDevice != "" && len(*options.DecklinkDevice) > 0 {
+		log.Printf("Streaming to DeckLink device: %s", *options.DecklinkDevice)
+
+		// Add the -re flag for real-time streaming, critical for DeckLink
+		inputArgs["re"] = ""
+
+		// DeckLink output pipeline
+		ffmpegCmd = ffmpeg.Input("pipe:", inputArgs).
+			Output(*options.DecklinkDevice,
+				ffmpeg.KwArgs{
+					"format":  "decklink",
+					"pix_fmt": "uyvy422",
+				},
+			).WithInput(pipeReader).ErrorToStdOut()
+
+	} else {
+		log.Printf("Recording to output file: %s", *options.OutputFile)
+		// Standard file output pipeline
+		ffmpegCmd = ffmpeg.Input("pipe:", inputArgs).
+			Output(*options.OutputFile,
+				ffmpeg.KwArgs{
+					"c:v":     "hevc_videotoolbox", // macos only
+					"b:v":     "25M",
+					"pix_fmt": ffmpegOutPixFmt,
+				},
+			).OverWriteOutput().WithInput(pipeReader).ErrorToStdOut()
+	}
 
 	if *options.FFMPEGPath != "" {
 		ffmpegCmd = ffmpegCmd.SetFfmpegPath(*options.FFMPEGPath)
@@ -165,8 +188,18 @@ func (r *Renderer) RunOffscreen(options *ShaderOptions) error {
 	r.RenderFrame(0, 0, [4]float32{0, 0, 0, 0})
 	r.offscreenRenderer.readPixelsAsync(*options.Width, *options.Height)
 
-	for i := 0; i < totalFrames; i++ {
-		fmt.Printf("\rRendering frame %d of %d", i+1, totalFrames)
+	var i int
+	for {
+		if *options.Duration > 0 && i >= totalFrames {
+			break
+		}
+
+		if *options.Duration > 0 {
+			fmt.Printf("\rRendering frame %d of %d", i+1, totalFrames)
+		} else {
+			fmt.Printf("\rRendering frame %d", i+1)
+		}
+
 		currentTime := float64(i) * timeStep
 
 		// Render the current frame
@@ -185,6 +218,8 @@ func (r *Renderer) RunOffscreen(options *ShaderOptions) error {
 			// We'll catch the main error from the ffmpeg goroutine.
 			break
 		}
+
+		i++
 	}
 
 	elapsed := time.Since(startTime).Seconds()
