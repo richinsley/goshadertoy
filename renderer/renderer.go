@@ -3,14 +3,11 @@ package renderer
 import (
 	"context"
 	"fmt"
-	"runtime"
 	"strings"
 	"time"
 
 	"github.com/go-gl/gl/v4.1-core/gl"
 	api "github.com/richinsley/goshadertoy/api"
-	"github.com/richinsley/goshadertoy/glfwcontext"
-	"github.com/richinsley/goshadertoy/headless"
 	inputs "github.com/richinsley/goshadertoy/inputs"
 	shader "github.com/richinsley/goshadertoy/shader"
 	gst "github.com/richinsley/goshadertranslator"
@@ -35,94 +32,12 @@ type RenderPass struct {
 	iChannelTimeLoc       int32
 }
 
-type Renderer struct {
-	context           *glfwcontext.Context
-	headlessContext   *headless.Headless
-	quadVAO           uint32
-	bufferPasses      []*RenderPass
-	namedPasses       map[string]*RenderPass
-	buffers           map[string]*inputs.Buffer
-	offscreenRenderer *OffscreenRenderer
-	blitProgram       uint32
-	width             int
-	height            int
-	recordMode        bool
-}
-
-func NewRenderer(width, height int, visible bool, bitDepth int) (*Renderer, error) {
-	r := &Renderer{
-		width:      width,
-		height:     height,
-		recordMode: !visible,
-	}
-	var err error
-
-	r.namedPasses = make(map[string]*RenderPass)
-	r.bufferPasses = make([]*RenderPass, 0)
-	r.buffers = make(map[string]*inputs.Buffer)
-
-	if r.recordMode && runtime.GOOS == "linux" {
-		r.headlessContext, err = headless.NewHeadless(width, height)
-	} else {
-		r.context, err = glfwcontext.New(width, height, visible)
-	}
-
-	if err != nil {
-		return nil, fmt.Errorf("failed to initialize graphics context: %w", err)
-	}
-
-	r.offscreenRenderer, err = NewOffscreenRenderer(r.width, r.height, bitDepth)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create offscreen renderer: %w", err)
-	}
-
-	return r, nil
-}
-
-func (r *Renderer) Shutdown() {
-	for _, pass := range r.namedPasses {
-		gl.DeleteProgram(pass.shaderProgram)
-	}
-	for _, buffer := range r.buffers {
-		buffer.Destroy()
-	}
-	for _, pass := range r.namedPasses {
-		for _, ch := range pass.channels {
-			if ch != nil {
-				// Avoid double-destroying buffers
-				if _, ok := ch.(*inputs.Buffer); !ok {
-					ch.Destroy()
-				}
-			}
-		}
-	}
-	gl.DeleteProgram(r.blitProgram)
-	r.offscreenRenderer.Destroy()
-	gl.DeleteVertexArrays(1, &r.quadVAO)
-
-	if r.context != nil {
-		r.context.Shutdown()
-	}
-	if r.headlessContext != nil {
-		r.headlessContext.Shutdown()
-	}
-}
-
-var quadVertices = []float32{
-	-1.0, 1.0, -1.0, -1.0, 1.0, -1.0,
-	-1.0, 1.0, 1.0, -1.0, 1.0, 1.0,
-}
-
-func (r *Renderer) GetUniformLocation(uniformMap map[string]gst.ShaderVariable, shaderProgram uint32, name string) int32 {
-	if v, ok := uniformMap[name]; ok {
-		loc := gl.GetUniformLocation(shaderProgram, gl.Str(v.MappedName+"\x00"))
-		if loc < 0 {
-			// It's not an error for a uniform to be unused and optimized out.
-			return -1
-		}
-		return loc
-	}
-	return -1
+func (r *Renderer) isGLES() bool {
+	// isGLES implicitly handled by which files are compiled.
+	// We can check if context is nil as a proxy.
+	// On Linux, context is nil in headless mode.
+	// On other platforms, context is never nil.
+	return r.context == nil
 }
 
 func (r *Renderer) GetRenderPass(name string, shaderArgs *api.ShaderArgs) (*RenderPass, error) {
@@ -206,10 +121,6 @@ func (r *Renderer) GetRenderPass(name string, shaderArgs *api.ShaderArgs) (*Rend
 	return retv, nil
 }
 
-func (r *Renderer) isGLES() bool {
-	return r.headlessContext != nil
-}
-
 func (r *Renderer) InitScene(shaderArgs *api.ShaderArgs) error {
 	var err error
 	if translator == nil {
@@ -270,6 +181,22 @@ func (r *Renderer) InitScene(shaderArgs *api.ShaderArgs) error {
 	return nil
 }
 
+var quadVertices = []float32{
+	-1.0, 1.0, -1.0, -1.0, 1.0, -1.0,
+	-1.0, 1.0, 1.0, -1.0, 1.0, 1.0,
+}
+
+func (r *Renderer) GetUniformLocation(uniformMap map[string]gst.ShaderVariable, shaderProgram uint32, name string) int32 {
+	if v, ok := uniformMap[name]; ok {
+		loc := gl.GetUniformLocation(shaderProgram, gl.Str(v.MappedName+"\x00"))
+		if loc < 0 {
+			return -1
+		}
+		return loc
+	}
+	return -1
+}
+
 func (r *Renderer) RenderFrame(time float64, frameCount int32, mouseData [4]float32, uniforms *inputs.Uniforms) {
 	var renderWidth, renderHeight int
 
@@ -285,19 +212,20 @@ func (r *Renderer) RenderFrame(time float64, frameCount int32, mouseData [4]floa
 			r.offscreenRenderer.width = fbWidth
 			r.offscreenRenderer.height = fbHeight
 			gl.BindTexture(gl.TEXTURE_2D, r.offscreenRenderer.textureID)
-			gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, int32(fbWidth), int32(fbHeight), 0, gl.RGBA, gl.FLOAT, nil)
+			gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, int32(fbWidth), int32(fbHeight), 0, gl.RGBA, gl.UNSIGNED_BYTE, nil)
+
+			gl.BindRenderbuffer(gl.RENDERBUFFER, r.offscreenRenderer.depthRenderbuffer)
+			gl.RenderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, int32(fbWidth), int32(fbHeight))
 
 			for _, buffer := range r.buffers {
 				buffer.Resize(fbWidth, fbHeight)
 			}
 		}
 	} else {
-		// Should not happen, but as a fallback
 		renderWidth = r.width
 		renderHeight = r.height
 	}
 
-	// Render buffer passes
 	for _, pass := range r.bufferPasses {
 		if pass.buffer != nil {
 			pass.buffer.BindForWriting()
@@ -307,25 +235,24 @@ func (r *Renderer) RenderFrame(time float64, frameCount int32, mouseData [4]floa
 		updateUniforms(pass, renderWidth, renderHeight, uniforms)
 		bindChannels(pass, uniforms)
 		gl.Viewport(0, 0, int32(renderWidth), int32(renderHeight))
-		gl.Clear(gl.COLOR_BUFFER_BIT)
+		gl.Clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT)
 		gl.BindVertexArray(r.quadVAO)
 		gl.DrawArrays(gl.TRIANGLES, 0, 6)
 		unbindChannels(pass)
 
 		if pass.buffer != nil {
 			pass.buffer.UnbindForWriting()
-			pass.buffer.SwapBuffers() // Prepare for the next frame
+			pass.buffer.SwapBuffers()
 		}
 	}
 
-	// Render the final image pass to the offscreen FBO
 	gl.BindFramebuffer(gl.FRAMEBUFFER, r.offscreenRenderer.fbo)
 	imagePass := r.namedPasses["image"]
 	gl.UseProgram(imagePass.shaderProgram)
 	updateUniforms(imagePass, renderWidth, renderHeight, uniforms)
 	bindChannels(imagePass, uniforms)
 	gl.Viewport(0, 0, int32(renderWidth), int32(renderHeight))
-	gl.Clear(gl.COLOR_BUFFER_BIT)
+	gl.Clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT)
 	gl.BindVertexArray(r.quadVAO)
 	gl.DrawArrays(gl.TRIANGLES, 0, 6)
 	unbindChannels(imagePass)
@@ -334,9 +261,6 @@ func (r *Renderer) RenderFrame(time float64, frameCount int32, mouseData [4]floa
 
 func (r *Renderer) Run() {
 	if r.context == nil {
-		// This implies we are in headless mode on a non-Linux OS,
-		// which is not supported by this logic. The main loop
-		// should be handled by the offscreen runner.
 		return
 	}
 	startTime := r.context.Time()
@@ -364,7 +288,7 @@ func (r *Renderer) Run() {
 			pixelX := cursorX * scaleX
 			pixelY := cursorY * scaleY
 			mouseX := float32(pixelX)
-			mouseY := float32(fbHeight) - float32(pixelY) // Flip Y for OpenGL
+			mouseY := float32(fbHeight) - float32(pixelY)
 			const mouseLeft = 0
 			isMouseDown := win.GetMouseButton(mouseLeft) == 1
 			if isMouseDown && !mouseWasDown {
@@ -381,14 +305,12 @@ func (r *Renderer) Run() {
 			mouseData = [4]float32{mouseX, mouseY, clickX, clickY}
 		}
 
-		// Prepare uniforms
-		var sampleRate float32 = 44100 // Default
+		var sampleRate float32 = 44100
 		var channelResolutions [4][3]float32
 		if imagePass, ok := r.namedPasses["image"]; ok {
 			for i, ch := range imagePass.channels {
 				if ch != nil {
 					channelResolutions[i] = ch.ChannelRes()
-					// Check if the channel is a microphone to get the sample rate
 					if mic, ok := ch.(interface{ SampleRate() int }); ok {
 						sampleRate = float32(mic.SampleRate())
 					}
@@ -397,7 +319,7 @@ func (r *Renderer) Run() {
 		}
 
 		frameRate := float32(1.0 / timeDelta)
-		if timeDelta == 0 { // Avoid division by zero on the first frame
+		if timeDelta == 0 {
 			frameRate = 60.0
 		}
 
@@ -414,10 +336,9 @@ func (r *Renderer) Run() {
 
 		r.RenderFrame(currentTime, frameCount, mouseData, uniforms)
 
-		// Blit the result to the screen
 		fbWidth, fbHeight := r.context.GetFramebufferSize()
 		gl.Viewport(0, 0, int32(fbWidth), int32(fbHeight))
-		gl.Clear(gl.COLOR_BUFFER_BIT)
+		gl.Clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT)
 		gl.UseProgram(r.blitProgram)
 		gl.ActiveTexture(gl.TEXTURE0)
 		gl.BindTexture(gl.TEXTURE_2D, r.offscreenRenderer.textureID)
@@ -466,7 +387,6 @@ func updateUniforms(pass *RenderPass, width, height int, uniforms *inputs.Unifor
 	}
 
 	if pass.iChannelResolutionLoc != -1 {
-		// Flatten the [4][3]float32 array for Uniform3fv
 		var res_flat [12]float32
 		for i := 0; i < 4; i++ {
 			res_flat[i*3] = uniforms.ChannelResolution[i][0]
