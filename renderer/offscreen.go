@@ -12,27 +12,23 @@ import (
 )
 
 type OffscreenRenderer struct {
-	fbo       uint32
-	textureID uint32
-	width     int
-	height    int
-	pbos      [2]uint32 // For double-buffering PBOs
-	pboIndex  int       // To track the current PBO
-	bitDepth  int
+	fbo               uint32
+	textureID         uint32
+	depthRenderbuffer uint32
+	width             int
+	height            int
+	pbos              [2]uint32 // For double-buffering PBOs
+	pboIndex          int	    // Index to track which PBO is currently in use
+	bitDepth          int
 }
 
-// getFormatForBitDepth returns the appropriate OpenGL and FFmpeg formats for a given bit depth.
-func getFormatForBitDepth(bitDepth int) (internalFormat int32, pixelFormat uint32, pixelType uint32, ffmpegInPixFmt string, ffmpegOutPixFmt string) {
+// getFormatForBitDepth controls the pixel format for FFmpeg readback.
+func getFormatForBitDepth(bitDepth int) (pixelFormat uint32, pixelType uint32, ffmpegInPixFmt string, ffmpegOutPixFmt string) {
 	switch bitDepth {
 	case 10, 12:
-		// For 10 or 12-bit output, we render to a 16-bit FBO.
-		// We read pixels as 16-bit unsigned shorts per channel (8 bytes/pixel).
-		// This matches FFmpeg's `rgba64le` (RGBA, 64-bit, little-endian) format.
-		// The encoder then converts this to a 10-bit YUV format.
-		return gl.RGBA16F, gl.RGBA, gl.UNSIGNED_SHORT, "rgba64le", "p010le"
+		return gl.RGBA, gl.HALF_FLOAT, "rgba64le", "p010le"
 	default: // 8-bit
-		// Standard 8-bit RGBA, output as standard 8-bit 4:2:0 YUV.
-		return gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, "rgba", "yuv420p"
+		return gl.RGBA, gl.UNSIGNED_BYTE, "rgba", "yuv420p"
 	}
 }
 
@@ -43,35 +39,59 @@ func NewOffscreenRenderer(width, height, bitDepth int) (*OffscreenRenderer, erro
 		bitDepth: bitDepth,
 	}
 
-	internalFormat, _, _, _, _ := getFormatForBitDepth(bitDepth)
-
 	gl.GenFramebuffers(1, &or.fbo)
 	gl.BindFramebuffer(gl.FRAMEBUFFER, or.fbo)
 
+	var internalColorFormat int32
+	var internalDepthFormat uint32
+	var colorTextureType uint32
+
+	if bitDepth > 8 {
+		// For HDR, use 16-bit float textures and a 24-bit depth buffer.
+		log.Println("Offscreen FBO: Using 16-bit float format for HDR.")
+		internalColorFormat = gl.RGBA16F
+		internalDepthFormat = gl.DEPTH_COMPONENT24
+		colorTextureType = gl.FLOAT
+	} else {
+		// For standard rendering, use the most compatible formats.
+		log.Println("Offscreen FBO: Using 8-bit format for SDR.")
+		internalColorFormat = gl.RGBA8
+		internalDepthFormat = gl.DEPTH_COMPONENT16
+		colorTextureType = gl.UNSIGNED_BYTE
+	}
+
+	// Create and attach the color texture with the chosen format.
 	gl.GenTextures(1, &or.textureID)
 	gl.BindTexture(gl.TEXTURE_2D, or.textureID)
-	// Set the FBO's texture to the correct internal format for the chosen bit depth.
-	gl.TexImage2D(gl.TEXTURE_2D, 0, internalFormat, int32(width), int32(height), 0, gl.RGBA, gl.FLOAT, nil)
+	gl.TexImage2D(gl.TEXTURE_2D, 0, internalColorFormat, int32(width), int32(height), 0, gl.RGBA, colorTextureType, nil)
 	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
 	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
 	gl.FramebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, or.textureID, 0)
 
-	// PBO INITIALIZATION
-	gl.GenBuffers(2, &or.pbos[0])
-	bytesPerPixel := 4 // Default for 8-bit RGBA
-	if bitDepth > 8 {
-		bytesPerPixel = 8 // for 10/12 bit (packed into 64-bit RGBA)
+	// Create and attach the depth renderbuffer with the chosen format.
+	gl.GenRenderbuffers(1, &or.depthRenderbuffer)
+	gl.BindRenderbuffer(gl.RENDERBUFFER, or.depthRenderbuffer)
+	gl.RenderbufferStorage(gl.RENDERBUFFER, internalDepthFormat, int32(width), int32(height))
+	gl.FramebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, or.depthRenderbuffer)
+
+	if status := gl.CheckFramebufferStatus(gl.FRAMEBUFFER); status != gl.FRAMEBUFFER_COMPLETE {
+		return nil, fmt.Errorf("offscreen framebuffer is not complete (status: 0x%x)", status)
 	}
+
+	// PBO Initialization
+	gl.GenBuffers(2, &or.pbos[0])
+	pixelFormat, _, _, _ := getFormatForBitDepth(bitDepth)
+	bytesPerPixel := 4 // Default for 8-bit RGBA
+	if pixelFormat == gl.RGBA && bitDepth > 8 {
+		bytesPerPixel = 8 // for 16-bit float RGBA
+	}
+
 	bufferSize := width * height * bytesPerPixel
 	gl.BindBuffer(gl.PIXEL_PACK_BUFFER, or.pbos[0])
 	gl.BufferData(gl.PIXEL_PACK_BUFFER, bufferSize, nil, gl.STREAM_READ)
 	gl.BindBuffer(gl.PIXEL_PACK_BUFFER, or.pbos[1])
 	gl.BufferData(gl.PIXEL_PACK_BUFFER, bufferSize, nil, gl.STREAM_READ)
 	gl.BindBuffer(gl.PIXEL_PACK_BUFFER, 0)
-
-	if gl.CheckFramebufferStatus(gl.FRAMEBUFFER) != gl.FRAMEBUFFER_COMPLETE {
-		return nil, fmt.Errorf("offscreen framebuffer is not complete")
-	}
 
 	gl.BindFramebuffer(gl.FRAMEBUFFER, 0)
 	return or, nil
@@ -80,28 +100,25 @@ func NewOffscreenRenderer(width, height, bitDepth int) (*OffscreenRenderer, erro
 func (or *OffscreenRenderer) Destroy() {
 	gl.DeleteFramebuffers(1, &or.fbo)
 	gl.DeleteTextures(1, &or.textureID)
-	gl.DeleteBuffers(2, &or.pbos[0]) // Clean up the PBOs
+	gl.DeleteRenderbuffers(1, &or.depthRenderbuffer)
+	gl.DeleteBuffers(2, &or.pbos[0])
 }
 
-// readPixelsAsync handles the asynchronous pixel transfer using two PBOs.
 func (or *OffscreenRenderer) readPixelsAsync(width, height int) ([]byte, error) {
 	currentPboIndex := or.pboIndex
 	nextPboIndex := (or.pboIndex + 1) % 2
 
+	pixelFormat, pixelType, _, _ := getFormatForBitDepth(or.bitDepth)
 	bytesPerPixel := 4
-	if or.bitDepth > 8 {
+	if pixelType == gl.HALF_FLOAT {
 		bytesPerPixel = 8
 	}
 	bufferSize := int32(width * height * bytesPerPixel)
 
-	_, pixelFormat, pixelType, _, _ := getFormatForBitDepth(or.bitDepth)
-
-	// Initiate the transfer for the CURRENT frame
 	gl.BindFramebuffer(gl.FRAMEBUFFER, or.fbo)
 	gl.BindBuffer(gl.PIXEL_PACK_BUFFER, or.pbos[currentPboIndex])
 	gl.ReadPixels(0, 0, int32(width), int32(height), pixelFormat, pixelType, nil)
 
-	// Read the data from the PREVIOUS frame's transfer
 	gl.BindBuffer(gl.PIXEL_PACK_BUFFER, or.pbos[nextPboIndex])
 	ptr := gl.MapBufferRange(gl.PIXEL_PACK_BUFFER, 0, int(bufferSize), gl.MAP_READ_BIT)
 	if ptr == nil {
@@ -109,8 +126,6 @@ func (or *OffscreenRenderer) readPixelsAsync(width, height int) ([]byte, error) 
 		return nil, fmt.Errorf("failed to map PBO")
 	}
 
-	// It's crucial to copy the data out of the mapped buffer before unmapping it.
-	// We create a new slice and copy the data into it.
 	dataCopy := make([]byte, bufferSize)
 	pixelData := (*[1 << 30]byte)(ptr)[:bufferSize:bufferSize]
 	copy(dataCopy, pixelData)
@@ -131,7 +146,7 @@ func (or *OffscreenRenderer) readPixelsAsync(width, height int) ([]byte, error) 
 func (r *Renderer) RunOffscreen(options *ShaderOptions) error {
 	pipeReader, pipeWriter := io.Pipe()
 
-	_, _, _, ffmpegInPixFmt, ffmpegOutPixFmt := getFormatForBitDepth(*options.BitDepth)
+	_, _, ffmpegInPixFmt, ffmpegOutPixFmt := getFormatForBitDepth(*options.BitDepth)
 
 	var ffmpegCmd *ffmpeg.Stream
 
@@ -158,7 +173,7 @@ func (r *Renderer) RunOffscreen(options *ShaderOptions) error {
 		ffmpegCmd = ffmpeg.Input("pipe:", inputArgs).
 			Output(*options.OutputFile,
 				ffmpeg.KwArgs{
-					"c:v":     "hevc_videotoolbox",
+					"c:v":     "hevc_nvenc", // "hevc_videotoolbox",
 					"b:v":     "25M",
 					"pix_fmt": ffmpegOutPixFmt,
 				},
@@ -178,7 +193,6 @@ func (r *Renderer) RunOffscreen(options *ShaderOptions) error {
 	timeStep := 1.0 / float64(*options.FPS)
 	startTime := time.Now()
 
-	// Dummy uniforms for the first frame
 	dummyUniforms := &inputs.Uniforms{
 		Time:      0,
 		TimeDelta: 0,

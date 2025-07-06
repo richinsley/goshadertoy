@@ -6,29 +6,28 @@ import (
 	inputs "github.com/richinsley/goshadertoy/inputs"
 )
 
-// A simple vertex shader for drawing a fullscreen quad.
-const vertexShaderSource = `#version 410 core
+// --- Desktop GL Shaders ---
+
+const vertexShaderSourceGL = `#version 410 core
 layout (location = 0) in vec2 in_vert;
 out vec2 frag_uv;
 void main() {
-	frag_uv = in_vert * 0.5 + 0.5;
+    frag_uv = in_vert * 0.5 + 0.5;
     gl_Position = vec4(in_vert, 0.0, 1.0);
 }
 `
 
-// The blit fragment shader is used to copy a texture to the screen.
-const blitFragmentShaderSourceFlip = `#version 410 core
+const blitFragmentShaderSourceFlipGL = `#version 410 core
 in vec2 frag_uv;
 out vec4 fragColor;
 uniform sampler2D u_texture;
 
 void main() {
-    // Flip the y-coordinate by subtracting it from 1.0
     fragColor = texture(u_texture, vec2(frag_uv.x, 1.0 - frag_uv.y));
 }
 `
 
-const blitFragmentShaderSource = `#version 410 core
+const blitFragmentShaderSourceGL = `#version 410 core
 in vec2 frag_uv;
 out vec4 fragColor;
 uniform sampler2D u_texture;
@@ -38,15 +37,59 @@ void main() {
 }
 `
 
-func GenerateVertexShader() string {
-	return vertexShaderSource
+// --- GLES Shaders ---
+
+const vertexShaderSourceGLES = `#version 300 es
+layout (location = 0) in vec2 in_vert;
+out vec2 frag_uv;
+void main() {
+    frag_uv = in_vert * 0.5 + 0.5;
+    gl_Position = vec4(in_vert, 0.0, 1.0);
+}
+`
+
+const blitFragmentShaderSourceFlipGLES = `#version 300 es
+precision mediump float;
+in vec2 frag_uv;
+out vec4 fragColor;
+uniform sampler2D u_texture;
+
+void main() {
+    fragColor = texture(u_texture, vec2(frag_uv.x, 1.0 - frag_uv.y));
+}
+`
+
+const blitFragmentShaderSourceGLES = `#version 300 es
+precision mediump float;
+in vec2 frag_uv;
+out vec4 fragColor;
+uniform sampler2D u_texture;
+
+void main() {
+    fragColor = texture(u_texture, frag_uv);
+}
+`
+
+// --- Public Functions ---
+
+func GenerateVertexShader(isGLES bool) string {
+	if isGLES {
+		return vertexShaderSourceGLES
+	}
+	return vertexShaderSourceGL
 }
 
-func GetBlitFragmentShader(flip bool) string {
-	if flip {
-		return blitFragmentShaderSourceFlip
+func GetBlitFragmentShader(flip bool, isGLES bool) string {
+	if isGLES {
+		if flip {
+			return blitFragmentShaderSourceFlipGLES
+		}
+		return blitFragmentShaderSourceGLES
 	}
-	return blitFragmentShaderSource
+	if flip {
+		return blitFragmentShaderSourceFlipGL
+	}
+	return blitFragmentShaderSourceGL
 }
 
 // GeneratePreamble creates the GLSL preamble with dynamic sampler types.

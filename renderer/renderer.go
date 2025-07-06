@@ -3,12 +3,14 @@ package renderer
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"strings"
 	"time"
 
 	"github.com/go-gl/gl/v4.1-core/gl"
 	api "github.com/richinsley/goshadertoy/api"
 	"github.com/richinsley/goshadertoy/glfwcontext"
+	"github.com/richinsley/goshadertoy/headless"
 	inputs "github.com/richinsley/goshadertoy/inputs"
 	shader "github.com/richinsley/goshadertoy/shader"
 	gst "github.com/richinsley/goshadertranslator"
@@ -35,6 +37,7 @@ type RenderPass struct {
 
 type Renderer struct {
 	context           *glfwcontext.Context
+	headlessContext   *headless.Headless
 	quadVAO           uint32
 	bufferPasses      []*RenderPass
 	namedPasses       map[string]*RenderPass
@@ -58,9 +61,14 @@ func NewRenderer(width, height int, visible bool, bitDepth int) (*Renderer, erro
 	r.bufferPasses = make([]*RenderPass, 0)
 	r.buffers = make(map[string]*inputs.Buffer)
 
-	r.context, err = glfwcontext.New(width, height, visible)
+	if r.recordMode && runtime.GOOS == "linux" {
+		r.headlessContext, err = headless.NewHeadless(width, height)
+	} else {
+		r.context, err = glfwcontext.New(width, height, visible)
+	}
+
 	if err != nil {
-		return nil, fmt.Errorf("failed to initialize glfw context: %w", err)
+		return nil, fmt.Errorf("failed to initialize graphics context: %w", err)
 	}
 
 	r.offscreenRenderer, err = NewOffscreenRenderer(r.width, r.height, bitDepth)
@@ -81,6 +89,7 @@ func (r *Renderer) Shutdown() {
 	for _, pass := range r.namedPasses {
 		for _, ch := range pass.channels {
 			if ch != nil {
+				// Avoid double-destroying buffers
 				if _, ok := ch.(*inputs.Buffer); !ok {
 					ch.Destroy()
 				}
@@ -90,7 +99,13 @@ func (r *Renderer) Shutdown() {
 	gl.DeleteProgram(r.blitProgram)
 	r.offscreenRenderer.Destroy()
 	gl.DeleteVertexArrays(1, &r.quadVAO)
-	r.context.Shutdown()
+
+	if r.context != nil {
+		r.context.Shutdown()
+	}
+	if r.headlessContext != nil {
+		r.headlessContext.Shutdown()
+	}
 }
 
 var quadVertices = []float32{
@@ -102,6 +117,7 @@ func (r *Renderer) GetUniformLocation(uniformMap map[string]gst.ShaderVariable, 
 	if v, ok := uniformMap[name]; ok {
 		loc := gl.GetUniformLocation(shaderProgram, gl.Str(v.MappedName+"\x00"))
 		if loc < 0 {
+			// It's not an error for a uniform to be unused and optimized out.
 			return -1
 		}
 		return loc
@@ -120,14 +136,24 @@ func (r *Renderer) GetRenderPass(name string, shaderArgs *api.ShaderArgs) (*Rend
 		return nil, fmt.Errorf("no render pass found with name: %s", name)
 	}
 
-	width, height := r.context.GetFramebufferSize()
+	width, height := r.width, r.height
+	if r.context != nil {
+		width, height = r.context.GetFramebufferSize()
+	}
+
 	channels, err := inputs.GetChannels(passArgs.Inputs, width, height, r.quadVAO, r.buffers)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create channels: %w", err)
 	}
 
 	fullFragmentSource := shader.GetFragmentShader(channels, shaderArgs.CommonCode, passArgs.Code)
-	fsShader, err := translator.TranslateShader(fullFragmentSource, "fragment", gst.ShaderSpecWebGL2, gst.OutputFormatGLSL330)
+
+	outputFormat := gst.OutputFormatGLSL330
+	if r.isGLES() {
+		outputFormat = gst.OutputFormatESSL
+	}
+
+	fsShader, err := translator.TranslateShader(fullFragmentSource, "fragment", gst.ShaderSpecWebGL2, outputFormat)
 	if err != nil {
 		return nil, fmt.Errorf("fragment shader translation failed: %w", err)
 	}
@@ -140,12 +166,13 @@ func (r *Renderer) GetRenderPass(name string, shaderArgs *api.ShaderArgs) (*Rend
 		retv.buffer = r.buffers[name]
 	}
 
-	vertexShaderSource := shader.GenerateVertexShader()
+	vertexShaderSource := shader.GenerateVertexShader(r.isGLES())
+
 	retv.shaderProgram, err = newProgram(vertexShaderSource, fsShader.Code)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create shader program: %w", err)
 	}
-	retv.channels = channels
+
 	uniformMap := fsShader.Variables
 	gl.UseProgram(retv.shaderProgram)
 
@@ -179,6 +206,10 @@ func (r *Renderer) GetRenderPass(name string, shaderArgs *api.ShaderArgs) (*Rend
 	return retv, nil
 }
 
+func (r *Renderer) isGLES() bool {
+	return r.headlessContext != nil
+}
+
 func (r *Renderer) InitScene(shaderArgs *api.ShaderArgs) error {
 	var err error
 	if translator == nil {
@@ -199,15 +230,17 @@ func (r *Renderer) InitScene(shaderArgs *api.ShaderArgs) error {
 	gl.BindBuffer(gl.ARRAY_BUFFER, 0)
 	gl.BindVertexArray(0)
 
-	r.blitProgram, err = newProgram(shader.GenerateVertexShader(), shader.GetBlitFragmentShader(r.recordMode))
+	blitVertexSource := shader.GenerateVertexShader(r.isGLES())
+	blitFragmentSource := shader.GetBlitFragmentShader(r.recordMode, r.isGLES())
+
+	r.blitProgram, err = newProgram(blitVertexSource, blitFragmentSource)
 	if err != nil {
 		return fmt.Errorf("failed to create blit program: %w", err)
 	}
 
-	width, height := r.context.GetFramebufferSize()
-	if r.recordMode {
-		width = r.offscreenRenderer.width
-		height = r.offscreenRenderer.height
+	width, height := r.width, r.height
+	if !r.recordMode && r.context != nil {
+		width, height = r.context.GetFramebufferSize()
 	}
 
 	for _, name := range []string{"A", "B", "C", "D"} {
@@ -243,7 +276,7 @@ func (r *Renderer) RenderFrame(time float64, frameCount int32, mouseData [4]floa
 	if r.recordMode {
 		renderWidth = r.width
 		renderHeight = r.height
-	} else {
+	} else if r.context != nil {
 		fbWidth, fbHeight := r.context.GetFramebufferSize()
 		renderWidth = fbWidth
 		renderHeight = fbHeight
@@ -258,8 +291,13 @@ func (r *Renderer) RenderFrame(time float64, frameCount int32, mouseData [4]floa
 				buffer.Resize(fbWidth, fbHeight)
 			}
 		}
+	} else {
+		// Should not happen, but as a fallback
+		renderWidth = r.width
+		renderHeight = r.height
 	}
 
+	// Render buffer passes
 	for _, pass := range r.bufferPasses {
 		if pass.buffer != nil {
 			pass.buffer.BindForWriting()
@@ -276,10 +314,11 @@ func (r *Renderer) RenderFrame(time float64, frameCount int32, mouseData [4]floa
 
 		if pass.buffer != nil {
 			pass.buffer.UnbindForWriting()
-			pass.buffer.SwapBuffers()
+			pass.buffer.SwapBuffers() // Prepare for the next frame
 		}
 	}
 
+	// Render the final image pass to the offscreen FBO
 	gl.BindFramebuffer(gl.FRAMEBUFFER, r.offscreenRenderer.fbo)
 	imagePass := r.namedPasses["image"]
 	gl.UseProgram(imagePass.shaderProgram)
@@ -294,6 +333,12 @@ func (r *Renderer) RenderFrame(time float64, frameCount int32, mouseData [4]floa
 }
 
 func (r *Renderer) Run() {
+	if r.context == nil {
+		// This implies we are in headless mode on a non-Linux OS,
+		// which is not supported by this logic. The main loop
+		// should be handled by the offscreen runner.
+		return
+	}
 	startTime := r.context.Time()
 	var frameCount int32 = 0
 	var lastMouseClickX, lastMouseClickY float64
@@ -319,7 +364,7 @@ func (r *Renderer) Run() {
 			pixelX := cursorX * scaleX
 			pixelY := cursorY * scaleY
 			mouseX := float32(pixelX)
-			mouseY := float32(fbHeight) - float32(pixelY)
+			mouseY := float32(fbHeight) - float32(pixelY) // Flip Y for OpenGL
 			const mouseLeft = 0
 			isMouseDown := win.GetMouseButton(mouseLeft) == 1
 			if isMouseDown && !mouseWasDown {
@@ -336,13 +381,14 @@ func (r *Renderer) Run() {
 			mouseData = [4]float32{mouseX, mouseY, clickX, clickY}
 		}
 
+		// Prepare uniforms
 		var sampleRate float32 = 44100 // Default
 		var channelResolutions [4][3]float32
-		// We get the resolutions from the 'image' pass channels
 		if imagePass, ok := r.namedPasses["image"]; ok {
 			for i, ch := range imagePass.channels {
 				if ch != nil {
 					channelResolutions[i] = ch.ChannelRes()
+					// Check if the channel is a microphone to get the sample rate
 					if mic, ok := ch.(interface{ SampleRate() int }); ok {
 						sampleRate = float32(mic.SampleRate())
 					}
@@ -351,7 +397,7 @@ func (r *Renderer) Run() {
 		}
 
 		frameRate := float32(1.0 / timeDelta)
-		if timeDelta == 0 {
+		if timeDelta == 0 { // Avoid division by zero on the first frame
 			frameRate = 60.0
 		}
 
@@ -368,6 +414,7 @@ func (r *Renderer) Run() {
 
 		r.RenderFrame(currentTime, frameCount, mouseData, uniforms)
 
+		// Blit the result to the screen
 		fbWidth, fbHeight := r.context.GetFramebufferSize()
 		gl.Viewport(0, 0, int32(fbWidth), int32(fbHeight))
 		gl.Clear(gl.COLOR_BUFFER_BIT)
@@ -419,7 +466,7 @@ func updateUniforms(pass *RenderPass, width, height int, uniforms *inputs.Unifor
 	}
 
 	if pass.iChannelResolutionLoc != -1 {
-		// We need to flatten the [4][3]float32 array to a single slice for Uniform3fv
+		// Flatten the [4][3]float32 array for Uniform3fv
 		var res_flat [12]float32
 		for i := 0; i < 4; i++ {
 			res_flat[i*3] = uniforms.ChannelResolution[i][0]

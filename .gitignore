@@ -32,4 +32,5 @@ go.work.sum
 # .vscode/
 output.mp4
 output.mov
+my_shader.mp4
 goshadertoy
