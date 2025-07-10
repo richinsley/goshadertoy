@@ -49,7 +49,7 @@ func getFormatForBitDepth(bitDepth int) (glpixelFormat uint32, glpixelType uint3
 	switch bitDepth {
 	case 10, 12:
 		// For 10/12-bit, we render to a 16-bit float texture and tell FFmpeg to encode to p010le
-		return glpixelFormat, gl.HALF_FLOAT, 107, "p010le"
+		return glpixelFormat, gl.UNSIGNED_SHORT, 107, "p010le"
 	default: // 8-bit
 		return gl.BGRA, gl.UNSIGNED_BYTE, 28, "yuv420p"
 	}
@@ -111,9 +111,14 @@ func NewOffscreenRenderer(width, height, bitDepth int) (*OffscreenRenderer, erro
 	// --- PBO Initialization ---
 	gl.GenBuffers(2, &or.pbos[0])
 	_, pixelType, _, _ := getFormatForBitDepth(bitDepth)
-	bytesPerPixel := 4 // Default for 8-bit RGBA
-	if pixelType == gl.HALF_FLOAT {
+	var bytesPerPixel int
+	switch pixelType {
+	case gl.UNSIGNED_BYTE:
+		bytesPerPixel = 4
+	case gl.UNSIGNED_SHORT, gl.HALF_FLOAT:
 		bytesPerPixel = 8
+	default:
+		return nil, fmt.Errorf("unsupported pixel type for PBO sizing: %v", pixelType)
 	}
 	bufferSize := width * height * bytesPerPixel
 	gl.BindBuffer(gl.PIXEL_PACK_BUFFER, or.pbos[0])
@@ -141,7 +146,7 @@ func (or *OffscreenRenderer) readPixelsAsync(width, height int) ([]byte, error) 
 
 	pixelFormat, pixelType, _, _ := getFormatForBitDepth(or.bitDepth)
 	bytesPerPixel := 4
-	if pixelType == gl.HALF_FLOAT {
+	if pixelType == gl.HALF_FLOAT || pixelType == gl.UNSIGNED_SHORT {
 		bytesPerPixel = 8
 	}
 	bufferSize := int32(width * height * bytesPerPixel)
@@ -225,7 +230,7 @@ func (r *Renderer) RunOffscreen(options *ShaderOptions) error {
 		"pix_fmt": ffmpegOutPixFmt,
 	}
 
-	// When HDR enabled and in high bit depth mode, tag both the input and output streams correctly.
+	// // When HDR enabled and in high bit depth mode, tag both the input and output streams correctly.
 	// if r.offscreenRenderer.bitDepth > 8 {
 	// 	// Tag the INPUT stream as linear light
 	// 	inputArgs["color_primaries"] = "bt2020"
