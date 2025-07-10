@@ -6,7 +6,7 @@ import (
 	"image/draw"
 	"log"
 
-	"github.com/go-gl/gl/v4.1-core/gl"
+	gl "github.com/go-gl/gl/v4.1-core/gl"
 	api "github.com/richinsley/goshadertoy/api"
 )
 

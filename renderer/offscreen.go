@@ -8,7 +8,7 @@ import (
 	"os/exec"
 	"unsafe"
 
-	"github.com/go-gl/gl/v4.1-core/gl"
+	gl "github.com/go-gl/gl/v4.1-core/gl"
 	inputs "github.com/richinsley/goshadertoy/inputs"
 	sharedmemory "github.com/richinsley/goshadertoy/sharedmemory"
 	ffmpeg "github.com/u2takey/ffmpeg-go"

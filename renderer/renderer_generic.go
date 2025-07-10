@@ -5,8 +5,8 @@ package renderer
 import (
 	"fmt"
 
-	"github.com/go-gl/gl/v4.1-core/gl"
-	"github.com/richinsley/goshadertoy/glfwcontext"
+	gl "github.com/go-gl/gl/v4.1-core/gl"
+	glfwcontext "github.com/richinsley/goshadertoy/glfwcontext"
 	inputs "github.com/richinsley/goshadertoy/inputs"
 )
 

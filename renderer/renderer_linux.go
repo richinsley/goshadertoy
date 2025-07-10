@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"runtime"
 
-	"github.com/go-gl/gl/v4.1-core/gl"
-	"github.com/richinsley/goshadertoy/glfwcontext"
-	"github.com/richinsley/goshadertoy/headless"
+	gl "github.com/go-gl/gl/v4.1-core/gl"
+	glfwcontext "github.com/richinsley/goshadertoy/glfwcontext"
+	headless "github.com/richinsley/goshadertoy/headless"
 	inputs "github.com/richinsley/goshadertoy/inputs"
 )
 

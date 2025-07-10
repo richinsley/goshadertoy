@@ -7,7 +7,7 @@ import (
 	"log"
 	"unsafe"
 
-	"github.com/go-gl/gl/v4.1-core/gl"
+	gl "github.com/go-gl/gl/v4.1-core/gl"
 )
 
 /*

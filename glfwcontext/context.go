@@ -4,8 +4,8 @@ import (
 	"log"
 	"runtime"
 
-	"github.com/go-gl/gl/v4.1-core/gl"
-	"github.com/go-gl/glfw/v3.3/glfw"
+	gl "github.com/go-gl/gl/v4.1-core/gl"
+	glfw "github.com/go-gl/glfw/v3.3/glfw"
 )
 
 // Context is a dedicated package for managing the GLFW window and context.

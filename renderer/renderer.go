@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-gl/gl/v4.1-core/gl"
+	gl "github.com/go-gl/gl/v4.1-core/gl"
 	api "github.com/richinsley/goshadertoy/api"
 	inputs "github.com/richinsley/goshadertoy/inputs"
 	shader "github.com/richinsley/goshadertoy/shader"

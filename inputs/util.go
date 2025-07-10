@@ -1,7 +1,7 @@
 package inputs
 
 import (
-	"github.com/go-gl/gl/v4.1-core/gl"
+	gl "github.com/go-gl/gl/v4.1-core/gl"
 )
 
 // Helper to convert Shadertoy wrap string to OpenGL constant.

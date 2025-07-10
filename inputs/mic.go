@@ -6,9 +6,9 @@ import (
 	"math"
 	"sync"
 
-	"github.com/go-gl/gl/v4.1-core/gl"
-	"github.com/mjibson/go-dsp/fft"
-	"github.com/richinsley/goshadertoy/audio"
+	gl "github.com/go-gl/gl/v4.1-core/gl"
+	fft "github.com/mjibson/go-dsp/fft"
+	audio "github.com/richinsley/goshadertoy/audio"
 )
 
 const (
