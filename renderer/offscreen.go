@@ -4,31 +4,54 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"time"
+	"os"
+	"os/exec"
+	"unsafe"
 
 	"github.com/go-gl/gl/v4.1-core/gl"
 	inputs "github.com/richinsley/goshadertoy/inputs"
+	sharedmemory "github.com/richinsley/goshadertoy/sharedmemory"
 	ffmpeg "github.com/u2takey/ffmpeg-go"
 )
+
+/*
+#include "protocol.h"
+*/
+import "C"
 
 type OffscreenRenderer struct {
 	fbo               uint32
 	textureID         uint32
 	depthRenderbuffer uint32
-	width             int
-	height            int
-	pbos              [2]uint32 // For double-buffering PBOs
-	pboIndex          int	    // Index to track which PBO is currently in use
-	bitDepth          int
+	// Add a second FBO and texture for the vertical flip blit
+	blitFbo       uint32
+	blitTextureID uint32
+	width         int
+	height        int
+	pbos          [2]uint32 // For double-buffering PBOs
+	pboIndex      int       // Index to track which PBO is currently in use
+	bitDepth      int
 }
 
+var havesetoptions = false
+
 // getFormatForBitDepth controls the pixel format for FFmpeg readback.
-func getFormatForBitDepth(bitDepth int) (pixelFormat uint32, pixelType uint32, ffmpegInPixFmt string, ffmpegOutPixFmt string) {
+func getFormatForBitDepth(bitDepth int) (glpixelFormat uint32, glpixelType uint32, ffmpegInPixFmt int, ffmpegOutPixFmt string) {
+	// Read pixels in BGRA format to match what many video encoders expect
+	glpixelFormat = gl.BGRA
+
+	// AV_PIX_FMT_RGBA 		26
+	// AV_PIX_FMT_BGRA 		28
+	// AV_PIX_FMT_P010LE 	158
+	// AV_PIX_FMT_BGRA64BE 	106
+	// AV_PIX_FMT_BGRA64LE 	107
+
 	switch bitDepth {
 	case 10, 12:
-		return gl.RGBA, gl.HALF_FLOAT, "rgba64le", "p010le"
+		// For 10/12-bit, we render to a 16-bit float texture and tell FFmpeg to encode to p010le
+		return glpixelFormat, gl.HALF_FLOAT, 107, "p010le"
 	default: // 8-bit
-		return gl.RGBA, gl.UNSIGNED_BYTE, "rgba", "yuv420p"
+		return gl.BGRA, gl.UNSIGNED_BYTE, 28, "yuv420p"
 	}
 }
 
@@ -39,60 +62,66 @@ func NewOffscreenRenderer(width, height, bitDepth int) (*OffscreenRenderer, erro
 		bitDepth: bitDepth,
 	}
 
-	gl.GenFramebuffers(1, &or.fbo)
-	gl.BindFramebuffer(gl.FRAMEBUFFER, or.fbo)
-
 	var internalColorFormat int32
 	var internalDepthFormat uint32
 	var colorTextureType uint32
 
 	if bitDepth > 8 {
-		// For HDR, use 16-bit float textures and a 24-bit depth buffer.
 		log.Println("Offscreen FBO: Using 16-bit float format for HDR.")
 		internalColorFormat = gl.RGBA16F
 		internalDepthFormat = gl.DEPTH_COMPONENT24
 		colorTextureType = gl.FLOAT
 	} else {
-		// For standard rendering, use the most compatible formats.
 		log.Println("Offscreen FBO: Using 8-bit format for SDR.")
 		internalColorFormat = gl.RGBA8
 		internalDepthFormat = gl.DEPTH_COMPONENT16
 		colorTextureType = gl.UNSIGNED_BYTE
 	}
 
-	// Create and attach the color texture with the chosen format.
+	// --- Create Main FBO for rendering ---
+	gl.GenFramebuffers(1, &or.fbo)
+	gl.BindFramebuffer(gl.FRAMEBUFFER, or.fbo)
 	gl.GenTextures(1, &or.textureID)
 	gl.BindTexture(gl.TEXTURE_2D, or.textureID)
 	gl.TexImage2D(gl.TEXTURE_2D, 0, internalColorFormat, int32(width), int32(height), 0, gl.RGBA, colorTextureType, nil)
 	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
 	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
 	gl.FramebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, or.textureID, 0)
-
-	// Create and attach the depth renderbuffer with the chosen format.
 	gl.GenRenderbuffers(1, &or.depthRenderbuffer)
 	gl.BindRenderbuffer(gl.RENDERBUFFER, or.depthRenderbuffer)
 	gl.RenderbufferStorage(gl.RENDERBUFFER, internalDepthFormat, int32(width), int32(height))
 	gl.FramebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, or.depthRenderbuffer)
-
-	if status := gl.CheckFramebufferStatus(gl.FRAMEBUFFER); status != gl.FRAMEBUFFER_COMPLETE {
-		return nil, fmt.Errorf("offscreen framebuffer is not complete (status: 0x%x)", status)
+	if gl.CheckFramebufferStatus(gl.FRAMEBUFFER) != gl.FRAMEBUFFER_COMPLETE {
+		return nil, fmt.Errorf("main offscreen fbo is not complete")
 	}
 
-	// PBO Initialization
+	// --- Create Blit FBO for flipping the image ---
+	gl.GenFramebuffers(1, &or.blitFbo)
+	gl.BindFramebuffer(gl.FRAMEBUFFER, or.blitFbo)
+	gl.GenTextures(1, &or.blitTextureID)
+	gl.BindTexture(gl.TEXTURE_2D, or.blitTextureID)
+	gl.TexImage2D(gl.TEXTURE_2D, 0, internalColorFormat, int32(width), int32(height), 0, gl.RGBA, colorTextureType, nil)
+	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+	gl.FramebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, or.blitTextureID, 0)
+	if gl.CheckFramebufferStatus(gl.FRAMEBUFFER) != gl.FRAMEBUFFER_COMPLETE {
+		return nil, fmt.Errorf("blit fbo is not complete")
+	}
+
+	// --- PBO Initialization ---
 	gl.GenBuffers(2, &or.pbos[0])
-	pixelFormat, _, _, _ := getFormatForBitDepth(bitDepth)
+	_, pixelType, _, _ := getFormatForBitDepth(bitDepth)
 	bytesPerPixel := 4 // Default for 8-bit RGBA
-	if pixelFormat == gl.RGBA && bitDepth > 8 {
-		bytesPerPixel = 8 // for 16-bit float RGBA
+	if pixelType == gl.HALF_FLOAT {
+		bytesPerPixel = 8
 	}
-
 	bufferSize := width * height * bytesPerPixel
 	gl.BindBuffer(gl.PIXEL_PACK_BUFFER, or.pbos[0])
 	gl.BufferData(gl.PIXEL_PACK_BUFFER, bufferSize, nil, gl.STREAM_READ)
 	gl.BindBuffer(gl.PIXEL_PACK_BUFFER, or.pbos[1])
 	gl.BufferData(gl.PIXEL_PACK_BUFFER, bufferSize, nil, gl.STREAM_READ)
-	gl.BindBuffer(gl.PIXEL_PACK_BUFFER, 0)
 
+	gl.BindBuffer(gl.PIXEL_PACK_BUFFER, 0)
 	gl.BindFramebuffer(gl.FRAMEBUFFER, 0)
 	return or, nil
 }
@@ -101,6 +130,8 @@ func (or *OffscreenRenderer) Destroy() {
 	gl.DeleteFramebuffers(1, &or.fbo)
 	gl.DeleteTextures(1, &or.textureID)
 	gl.DeleteRenderbuffers(1, &or.depthRenderbuffer)
+	gl.DeleteFramebuffers(1, &or.blitFbo)
+	gl.DeleteTextures(1, &or.blitTextureID)
 	gl.DeleteBuffers(2, &or.pbos[0])
 }
 
@@ -115,7 +146,7 @@ func (or *OffscreenRenderer) readPixelsAsync(width, height int) ([]byte, error) 
 	}
 	bufferSize := int32(width * height * bytesPerPixel)
 
-	gl.BindFramebuffer(gl.FRAMEBUFFER, or.fbo)
+	// Reads from the FBO bound to GL_READ_FRAMEBUFFER by the caller
 	gl.BindBuffer(gl.PIXEL_PACK_BUFFER, or.pbos[currentPboIndex])
 	gl.ReadPixels(0, 0, int32(width), int32(height), pixelFormat, pixelType, nil)
 
@@ -130,133 +161,188 @@ func (or *OffscreenRenderer) readPixelsAsync(width, height int) ([]byte, error) 
 	pixelData := (*[1 << 30]byte)(ptr)[:bufferSize:bufferSize]
 	copy(dataCopy, pixelData)
 
-	// Unmap the buffer now that we have the slice
 	gl.UnmapBuffer(gl.PIXEL_PACK_BUFFER)
-
-	// Clean up and update state
 	gl.BindBuffer(gl.PIXEL_PACK_BUFFER, 0)
-	gl.BindFramebuffer(gl.FRAMEBUFFER, 0)
-
-	// Update the index for the next frame
 	or.pboIndex = nextPboIndex
 
 	return dataCopy, nil
 }
 
 func (r *Renderer) RunOffscreen(options *ShaderOptions) error {
+	shmNameStr := "/goshadertoy"
+
+	// calculate bytes per pixel based on bit depth.
+	bytesPerPixel := 4 // Default for 8-bit RGBA
+	if r.offscreenRenderer.bitDepth > 8 {
+		bytesPerPixel = 8 // For 10/12-bit HDR (using 16-bit float textures)
+	}
+	frameSize := *options.Width * *options.Height * bytesPerPixel
+
+	// The shared memory only needs to be large enough for a single frame of pixel data.
+	shmSize := frameSize
+
+	// Create shared memory using the wrapper
+	shm, err := sharedmemory.CreateSharedMemory(shmNameStr, shmSize)
+	if err != nil {
+		return fmt.Errorf("failed to create shared memory: %w", err)
+	}
+	defer shm.Close()
+
+	// --- Prepare the main SHMHeader ---
+	header := C.SHMHeader{}
+
+	// Get a pointer to the shm_file field
+	shmFilePtr := (*[512]C.char)(unsafe.Pointer(&header.shm_file))
+
+	// the shm_file needs to start with '/'
+	shmFilePtr[0] = '/'
+
+	// Copy bytes from the Go string to the C char array
+	for i := 0; i < len(shmNameStr) && i < 511; i++ { // reserve 1 byte for null-terminator
+		shmFilePtr[i+1] = C.char(shmNameStr[i])
+	}
+	shmFilePtr[len(shmNameStr)+1] = 0 // null-terminate
+
+	_, _, ffmpegInPixFmt, ffmpegOutPixFmt := getFormatForBitDepth(r.offscreenRenderer.bitDepth)
+
+	header.width = C.uint32_t(*options.Width)
+	header.height = C.uint32_t(*options.Height)
+	header.frame_rate = C.uint32_t(*options.FPS)
+
+	header.pix_fmt = C.int32_t(ffmpegInPixFmt) // This is the pixel format for FFmpeg input that matches the GL format.
+	headerBytes := (*[unsafe.Sizeof(header)]byte)(unsafe.Pointer(&header))[:]
+
+	// --- Setup FFmpeg with a pipe for control data ---
 	pipeReader, pipeWriter := io.Pipe()
+	defer pipeWriter.Close()
 
-	_, _, ffmpegInPixFmt, ffmpegOutPixFmt := getFormatForBitDepth(*options.BitDepth)
+	log.Printf("Recording to output file: %s with pix_fmt: %s", *options.OutputFile, ffmpegOutPixFmt)
 
-	var ffmpegCmd *ffmpeg.Stream
-
-	inputArgs := ffmpeg.KwArgs{
-		"format":  "rawvideo",
-		"pix_fmt": ffmpegInPixFmt,
-		"s":       fmt.Sprintf("%dx%d", *options.Width, *options.Height),
-		"r":       fmt.Sprintf("%d", *options.FPS),
+	inputArgs := ffmpeg.KwArgs{"f": "shm_demuxer"}
+	outputArgs := ffmpeg.KwArgs{
+		"c:v":     "hevc_videotoolbox",
+		"b:v":     "25M",
+		"pix_fmt": ffmpegOutPixFmt,
 	}
 
-	if *options.DecklinkDevice != "" && len(*options.DecklinkDevice) > 0 {
-		log.Printf("Streaming to DeckLink device: %s", *options.DecklinkDevice)
-		inputArgs["re"] = ""
-		ffmpegCmd = ffmpeg.Input("pipe:", inputArgs).
-			Output(*options.DecklinkDevice,
-				ffmpeg.KwArgs{
-					"format":  "decklink",
-					"pix_fmt": "uyvy422",
-				},
-			).WithInput(pipeReader).ErrorToStdOut()
+	// When HDR enabled and in high bit depth mode, tag both the input and output streams correctly.
+	// if r.offscreenRenderer.bitDepth > 8 {
+	// 	// Tag the INPUT stream as linear light
+	// 	inputArgs["color_primaries"] = "bt2020"
+	// 	inputArgs["color_trc"] = "linear"
+	// 	// inputArgs["colorspace"] = "bt2020"
 
-	} else {
-		log.Printf("Recording to output file: %s", *options.OutputFile)
-		ffmpegCmd = ffmpeg.Input("pipe:", inputArgs).
-			Output(*options.OutputFile,
-				ffmpeg.KwArgs{
-					"c:v":     "hevc_nvenc", // "hevc_videotoolbox",
-					"b:v":     "25M",
-					"pix_fmt": ffmpegOutPixFmt,
-				},
-			).OverWriteOutput().WithInput(pipeReader).ErrorToStdOut()
-	}
+	// 	// Tag the OUTPUT stream for HDR display
+	// 	outputArgs["color_primaries"] = "bt2020"
+	// 	outputArgs["color_trc"] = "smpte2084" // PQ (HDR10)
+	// 	outputArgs["colorspace"] = "bt2020nc"
+	// }
+
+	log.Printf("Recording to output file: %s with pix_fmt: %s", *options.OutputFile, ffmpegOutPixFmt)
+	ffmpegCmd := ffmpeg.Input("pipe:", inputArgs).
+		Output(*options.OutputFile, outputArgs).
+		OverWriteOutput().WithInput(pipeReader).ErrorToStdOut()
 
 	if *options.FFMPEGPath != "" {
 		ffmpegCmd = ffmpegCmd.SetFfmpegPath(*options.FFMPEGPath)
 	}
 
+	if !havesetoptions {
+		ffmpeg.GlobalCommandOptions = append(ffmpeg.GlobalCommandOptions, func(cmd *exec.Cmd) {
+			cmd.Env = os.Environ()
+		})
+		havesetoptions = true
+	}
+
 	errc := make(chan error, 1)
 	go func() {
+		log.Println("Starting FFmpeg...")
 		errc <- ffmpegCmd.Run()
+		log.Println("FFmpeg finished.")
 	}()
+
+	// Write the initial header to the pipe so the demuxer can start.
+	if _, err := pipeWriter.Write(headerBytes); err != nil {
+		return fmt.Errorf("failed to write header to FFmpeg: %w", err)
+	}
 
 	totalFrames := int(*options.Duration * float64(*options.FPS))
 	timeStep := 1.0 / float64(*options.FPS)
-	startTime := time.Now()
 
-	dummyUniforms := &inputs.Uniforms{
-		Time:      0,
-		TimeDelta: 0,
-		FrameRate: float32(*options.FPS),
-		Frame:     -1,
-		Mouse:     [4]float32{0, 0, 0, 0},
-		ChannelTime: [4]float32{
-			0, 0, 0, 0,
-		},
-		SampleRate: 44100,
-	}
-
-	r.RenderFrame(0, -1, [4]float32{0, 0, 0, 0}, dummyUniforms)
-	r.offscreenRenderer.readPixelsAsync(*options.Width, *options.Height)
-
-	var i int
-	for {
-		if *options.Duration > 0 && i >= totalFrames {
-			break
-		}
-
-		if *options.Duration > 0 {
-			fmt.Printf("\rRendering frame %d of %d", i+1, totalFrames)
-		} else {
-			fmt.Printf("\rRendering frame %d", i+1)
-		}
-
+	log.Printf("Starting to render %d frames...", totalFrames)
+	for i := 0; i < totalFrames; i++ {
 		currentTime := float64(i) * timeStep
-		timeDelta := float32(timeStep)
-
 		uniforms := &inputs.Uniforms{
 			Time:      float32(currentTime),
-			TimeDelta: timeDelta,
+			TimeDelta: float32(timeStep),
 			FrameRate: float32(*options.FPS),
 			Frame:     int32(i),
-			Mouse:     [4]float32{0, 0, 0, 0},
-			ChannelTime: [4]float32{
-				float32(currentTime),
-				float32(currentTime),
-				float32(currentTime),
-				float32(currentTime),
-			},
-			SampleRate: 44100,
 		}
 
+		// Render the frame and get the pixel data
 		r.RenderFrame(currentTime, int32(i), [4]float32{0, 0, 0, 0}, uniforms)
 
-		pixels, err := r.offscreenRenderer.readPixelsAsync(*options.Width, *options.Height)
-		if err != nil {
-			pipeWriter.Close()
-			return fmt.Errorf("failed to read pixels for frame %d: %w", i, err)
-		}
+		// Perform the vertical flip by blitting from the main FBO to the blit FBO
+		gl.BindFramebuffer(gl.FRAMEBUFFER, r.offscreenRenderer.blitFbo)
+		gl.Clear(gl.COLOR_BUFFER_BIT)
+		gl.UseProgram(r.blitProgram)
+		gl.ActiveTexture(gl.TEXTURE0)
 
-		if _, err := pipeWriter.Write(pixels); err != nil {
+		// Use the output of the main render as the texture for the blit
+		gl.BindTexture(gl.TEXTURE_2D, r.offscreenRenderer.textureID)
+		gl.BindVertexArray(r.quadVAO)
+		gl.DrawArrays(gl.TRIANGLES, 0, 6)
+
+		// Read the pixels from the blit FBO, which now contains the flipped image
+		gl.BindFramebuffer(gl.READ_FRAMEBUFFER, r.offscreenRenderer.blitFbo)
+		pixels, err := r.offscreenRenderer.readPixelsAsync(*options.Width, *options.Height)
+		gl.BindFramebuffer(gl.READ_FRAMEBUFFER, 0) // Unbind
+
+		if err != nil {
+			log.Printf("Error reading pixels on frame %d: %v", i, err)
 			break
 		}
 
-		i++
+		if len(pixels) != frameSize {
+			log.Printf("Error: pixel buffer size mismatch on frame %d. Expected %d, got %d", i, frameSize, len(pixels))
+			continue
+		}
+
+		// Write the latest pixel data to the start of the shared memory buffer.
+		if _, err := shm.WriteAt(pixels, 0); err != nil {
+			log.Printf("Error writing pixel data on frame %d: %v", i, err)
+			break
+		}
+
+		// Prepare the frame header to send down the pipe.
+		frameHeader := C.FrameHeader{
+			cmdtype: C.uint32_t(0), // 0 for video
+			size:    C.uint32_t(len(pixels)),
+			pts:     C.int64_t(i),
+		}
+		frameHeaderBytes := (*[unsafe.Sizeof(frameHeader)]byte)(unsafe.Pointer(&frameHeader))[:]
+
+		// Write the frame header to the pipe to signal a new frame is ready.
+		if _, err := pipeWriter.Write(frameHeaderBytes); err != nil {
+			log.Printf("Error writing frame header to FFmpeg on frame %d: %v", i, err)
+			break
+		}
+
+		fmt.Printf("\rRendering frame %d of %d", i+1, totalFrames)
+	}
+	fmt.Println("\nFinished rendering frames.")
+
+	// Send the EOF command down the pipe.
+	eofHeader := C.FrameHeader{
+		cmdtype: C.uint32_t(2), // 2 for EOF
+		size:    0,
+		pts:     0,
+	}
+	eofHeaderBytes := (*[unsafe.Sizeof(eofHeader)]byte)(unsafe.Pointer(&eofHeader))[:]
+	if _, err := pipeWriter.Write(eofHeaderBytes); err != nil {
+		log.Printf("Error writing EOF header to FFmpeg: %v", err)
 	}
 
-	elapsed := time.Since(startTime).Seconds()
-	avgFPS := float64(totalFrames) / elapsed
-	fmt.Printf("\nFinished rendering %d frames in %.2f seconds (Avg: %.2f FPS)\n", totalFrames, elapsed, avgFPS)
-
-	pipeWriter.Close()
+	// Wait for FFmpeg to finish processing.
 	return <-errc
 }
