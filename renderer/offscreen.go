@@ -224,7 +224,8 @@ func (r *Renderer) RunOffscreen(options *ShaderOptions) error {
 
 	inputArgs := ffmpeg.KwArgs{"f": "shm_demuxer"}
 	outputArgs := ffmpeg.KwArgs{
-		"c:v":     "hevc_videotoolbox",
+		// "c:v":     "hevc_videotoolbox",
+		"c:v":     "hevc_nvenc", 
 		"b:v":     "25M",
 		"pix_fmt": ffmpegOutPixFmt,
 		"tag:v":   "hvc1", // <= Use hvc1 for HEVC encoding for quicktime compatibility

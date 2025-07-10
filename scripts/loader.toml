@@ -1,0 +1,3 @@
+plugins = [
+        { path = "/usr/local/lib/libtest_arcana_plugs.so" }
+]
