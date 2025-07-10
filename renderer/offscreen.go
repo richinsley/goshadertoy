@@ -219,7 +219,6 @@ func (r *Renderer) RunOffscreen(options *ShaderOptions) error {
 
 	// --- Setup FFmpeg with a pipe for control data ---
 	pipeReader, pipeWriter := io.Pipe()
-	defer pipeWriter.Close()
 
 	log.Printf("Recording to output file: %s with pix_fmt: %s", *options.OutputFile, ffmpegOutPixFmt)
 
@@ -228,6 +227,8 @@ func (r *Renderer) RunOffscreen(options *ShaderOptions) error {
 		"c:v":     "hevc_videotoolbox",
 		"b:v":     "25M",
 		"pix_fmt": ffmpegOutPixFmt,
+		"tag:v":   "hvc1", // <= Use hvc1 for HEVC encoding for quicktime compatibility
+		// "movflags": "+faststart",
 	}
 
 	// // When HDR enabled and in high bit depth mode, tag both the input and output streams correctly.
@@ -348,6 +349,12 @@ func (r *Renderer) RunOffscreen(options *ShaderOptions) error {
 		log.Printf("Error writing EOF header to FFmpeg: %v", err)
 	}
 
+	log.Println("Closing FFmpeg pipe writer to signal end of stream...")
+	pipeWriter.Close()
+
 	// Wait for FFmpeg to finish processing.
-	return <-errc
+	log.Println("Waiting for FFmpeg process to exit...")
+	err = <-errc
+	log.Println("FFmpeg process has exited.")
+	return err
 }
