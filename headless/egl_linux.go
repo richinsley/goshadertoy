@@ -71,14 +71,17 @@ func getEGLDisplay() (C.EGLDisplay, error) {
 		return C.EGLDisplay(C.EGL_NO_DISPLAY), fmt.Errorf("failed to query EGL devices")
 	}
 
-	// Get the display from the first device.
-	display := C.get_platform_display(C.EGL_PLATFORM_DEVICE_EXT, unsafe.Pointer(devices[0]), nil)
-	if display == C.EGLDisplay(C.EGL_NO_DISPLAY) {
-		return C.EGLDisplay(C.EGL_NO_DISPLAY), fmt.Errorf("eglGetPlatformDisplayEXT for device 0 failed")
+	// Iterate through the devices and get a display from the first one that works.
+	// In an NVIDIA Docker container, this will be the NVIDIA GPU.
+	for i := 0; i < int(num_devices); i++ {
+		display := C.get_platform_display(C.EGL_PLATFORM_DEVICE_EXT, unsafe.Pointer(devices[i]), nil)
+		if display != C.EGLDisplay(C.EGL_NO_DISPLAY) {
+			log.Printf("Successfully got EGL display from device %d.", i)
+			return display, nil
+		}
 	}
 
-	log.Println("Successfully got EGL display from device platform.")
-	return display, nil
+	return C.EGLDisplay(C.EGL_NO_DISPLAY), fmt.Errorf("could not get a valid EGL display from any available device")
 }
 
 func NewHeadless(width, height int) (*Headless, error) {

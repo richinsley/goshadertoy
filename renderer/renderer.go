@@ -3,6 +3,7 @@ package renderer
 import (
 	"context"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -178,6 +179,11 @@ func (r *Renderer) InitScene(shaderArgs *api.ShaderArgs) error {
 			r.bufferPasses = append(r.bufferPasses, pass)
 		}
 	}
+
+	log.Printf("OpenGL Vendor: %s", gl.GoStr(gl.GetString(gl.VENDOR)))
+	log.Printf("OpenGL Renderer: %s", gl.GoStr(gl.GetString(gl.RENDERER)))
+	log.Printf("OpenGL Version: %s", gl.GoStr(gl.GetString(gl.VERSION)))
+
 	return nil
 }
 

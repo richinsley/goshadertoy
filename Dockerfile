@@ -75,15 +75,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
     texinfo \
     zlib1g-dev \
-    mesa-utils \
-    libegl1-mesa \
+    # mesa-utils \
+    # libegl1-mesa \
     xvfb \
     wget \
     unzip \
     gdb \
     gdbserver \
-    python3-dev \
-    python3-pip \
     && rm -rf /var/lib/apt/lists/*
 
 # --- Install Go ---
