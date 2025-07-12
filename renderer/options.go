@@ -4,7 +4,7 @@ type ShaderOptions struct {
 	APIKey         *string
 	ShaderID       *string
 	Help           *bool
-	Record         *bool
+	Mode           *string
 	Duration       *float64
 	FPS            *int
 	Width          *int
@@ -13,4 +13,5 @@ type ShaderOptions struct {
 	OutputFile     *string
 	FFMPEGPath     *string
 	DecklinkDevice *string
+	Codec          *string
 }

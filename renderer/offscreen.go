@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"runtime"
 	"unsafe"
 
 	gl "github.com/go-gl/gl/v4.1-core/gl"
@@ -173,6 +174,103 @@ func (or *OffscreenRenderer) readPixelsAsync(width, height int) ([]byte, error) 
 	return dataCopy, nil
 }
 
+func (r *Renderer) getArgs(options *ShaderOptions, ffmpegOutPixFmt string) (inputArgs ffmpeg.KwArgs, outputArgs ffmpeg.KwArgs) {
+	// Prepare input arguments for FFmpeg
+	inputArgs = ffmpeg.KwArgs{
+		"f": "shm_demuxer",
+	}
+
+	// set colorimetry options based on bit depth
+	if *options.BitDepth > 8 {
+		inputArgs["color_primaries"] = "bt2020"
+		inputArgs["color_trc"] = "linear"
+	}
+
+	outputArgs = ffmpeg.KwArgs{}
+	if *options.Codec == "hevc" {
+		switch runtime.GOOS {
+		case "windows":
+			outputArgs["c:v"] = "hevc_nvenc" // Use NVENC on Windows for HEVC
+		case "linux":
+			outputArgs["c:v"] = "hevc_nvenc" // Use NVENC on Linux for HEVC
+		case "darwin": // macOS
+			outputArgs["c:v"] = "hevc_videotoolbox" // Use VideoToolbox on macOS for HEVC
+		default:
+			outputArgs["c:v"] = "libx265" // Fallback to software encoding
+		}
+	} else if *options.Codec == "h264" {
+		switch runtime.GOOS {
+		case "windows":
+			outputArgs["c:v"] = "h264_nvenc" // Use NVENC on Windows for H.264
+		case "linux":
+			outputArgs["c:v"] = "h264_nvenc" // Use NVENC on Linux for H.264
+		case "darwin": // macOS
+			outputArgs["c:v"] = "h264_videotoolbox" // Use VideoToolbox on macOS for H.264
+		default:
+			outputArgs["c:v"] = "libx264" // Fallback to software encoding
+		}
+	} else {
+		log.Printf("Unsupported codec: %s. Defaulting to H.264 with libx264.", *options.Codec)
+		outputArgs["c:v"] = "libx264" // Default to H.264 software encoding
+	}
+
+	// Set common output arguments
+	outputArgs["b:v"] = "25M" // Set video bitrate
+
+	outputArgs["pix_fmt"] = ffmpegOutPixFmt // Set pixel format for output
+
+	// if we are recording to mp4 or mov with HEVC, we need to set the tag to hvc1 for quicktime compatibility
+	if *options.Codec == "hevc" && *options.Mode == "record" {
+		path := *options.OutputFile
+		if path[len(path)-4:] != ".mp4" && path[len(path)-4:] != ".mov" {
+			outputArgs["tag:v"] = "hvc1" // Use hvc1 for HEVC encoding for quicktime compatibility
+		}
+	}
+
+	// for stream mode, we always set the output format to mpegts
+	if *options.Mode == "stream" {
+		outputArgs["f"] = "mpegts" // Set output format to MPEG-TS for streaming
+	}
+	/*
+		inputArgs := ffmpeg.KwArgs{"f": "shm_demuxer"}
+		outputArgs := ffmpeg.KwArgs{
+			// "c:v":     "hevc_videotoolbox",
+			"c:v":     "hevc_nvenc",
+			"b:v":     "25M",
+			"pix_fmt": ffmpegOutPixFmt,
+			"tag:v":   "hvc1", // <= Use hvc1 for HEVC encoding for quicktime compatibility
+			// "movflags": "+faststart",
+		}
+	*/
+
+	/*
+		outputArgs := ffmpeg.KwArgs{
+			// "c:v":     "hevc_videotoolbox",
+			"c:v":     "hevc_nvenc",
+			"b:v":     "25M",
+			"pix_fmt": ffmpegOutPixFmt,
+			"f":       "mpegts", // Output format
+			// "tag:v":   "hvc1", // <= Use hvc1 for HEVC encoding for quicktime compatibility
+			// "movflags": "+faststart",
+		}
+
+		// // When HDR enabled and in high bit depth mode, tag both the input and output streams correctly.
+		// if r.offscreenRenderer.bitDepth > 8 {
+		// 	// Tag the INPUT stream as linear light
+		// 	inputArgs["color_primaries"] = "bt2020"
+		// 	inputArgs["color_trc"] = "linear"
+		// 	// inputArgs["colorspace"] = "bt2020"
+
+		// 	// Tag the OUTPUT stream for HDR display
+		// 	outputArgs["color_primaries"] = "bt2020"
+		// 	outputArgs["color_trc"] = "smpte2084" // PQ (HDR10)
+		// 	outputArgs["colorspace"] = "bt2020nc"
+		// }
+	*/
+
+	return inputArgs, outputArgs
+}
+
 func (r *Renderer) RunOffscreen(options *ShaderOptions) error {
 	shmNameStr := "/goshadertoy"
 
@@ -217,33 +315,11 @@ func (r *Renderer) RunOffscreen(options *ShaderOptions) error {
 	header.pix_fmt = C.int32_t(ffmpegInPixFmt) // This is the pixel format for FFmpeg input that matches the GL format.
 	headerBytes := (*[unsafe.Sizeof(header)]byte)(unsafe.Pointer(&header))[:]
 
-	// --- Setup FFmpeg with a pipe for control data ---
+	// setup FFmpeg with a pipe for control data
 	pipeReader, pipeWriter := io.Pipe()
 
-	log.Printf("Recording to output file: %s with pix_fmt: %s", *options.OutputFile, ffmpegOutPixFmt)
-
-	inputArgs := ffmpeg.KwArgs{"f": "shm_demuxer"}
-	outputArgs := ffmpeg.KwArgs{
-		// "c:v":     "hevc_videotoolbox",
-		"c:v":     "hevc_nvenc", 
-		"b:v":     "25M",
-		"pix_fmt": ffmpegOutPixFmt,
-		"tag:v":   "hvc1", // <= Use hvc1 for HEVC encoding for quicktime compatibility
-		// "movflags": "+faststart",
-	}
-
-	// // When HDR enabled and in high bit depth mode, tag both the input and output streams correctly.
-	// if r.offscreenRenderer.bitDepth > 8 {
-	// 	// Tag the INPUT stream as linear light
-	// 	inputArgs["color_primaries"] = "bt2020"
-	// 	inputArgs["color_trc"] = "linear"
-	// 	// inputArgs["colorspace"] = "bt2020"
-
-	// 	// Tag the OUTPUT stream for HDR display
-	// 	outputArgs["color_primaries"] = "bt2020"
-	// 	outputArgs["color_trc"] = "smpte2084" // PQ (HDR10)
-	// 	outputArgs["colorspace"] = "bt2020nc"
-	// }
+	// get the input and output arguments for FFmpeg
+	inputArgs, outputArgs := r.getArgs(options, ffmpegOutPixFmt)
 
 	log.Printf("Recording to output file: %s with pix_fmt: %s", *options.OutputFile, ffmpegOutPixFmt)
 	ffmpegCmd := ffmpeg.Input("pipe:", inputArgs).
@@ -273,11 +349,24 @@ func (r *Renderer) RunOffscreen(options *ShaderOptions) error {
 		return fmt.Errorf("failed to write header to FFmpeg: %w", err)
 	}
 
-	totalFrames := int(*options.Duration * float64(*options.FPS))
+	totalFrames := 0
+	renderForever := *options.Mode == "stream"
+	if !renderForever {
+		totalFrames = int(*options.Duration * float64(*options.FPS))
+		log.Printf("Starting to render %d frames...", totalFrames)
+	} else {
+		log.Println("Starting to render frames indefinitely...")
+	}
+
 	timeStep := 1.0 / float64(*options.FPS)
 
 	log.Printf("Starting to render %d frames...", totalFrames)
-	for i := 0; i < totalFrames; i++ {
+	for i := 0; ; i++ {
+		// If not rendering forever, check if we have rendered all the frames.
+		if !renderForever && i >= totalFrames {
+			break
+		}
+
 		currentTime := float64(i) * timeStep
 		uniforms := &inputs.Uniforms{
 			Time:      float32(currentTime),
@@ -334,8 +423,6 @@ func (r *Renderer) RunOffscreen(options *ShaderOptions) error {
 			log.Printf("Error writing frame header to FFmpeg on frame %d: %v", i, err)
 			break
 		}
-
-		fmt.Printf("\rRendering frame %d of %d", i+1, totalFrames)
 	}
 	fmt.Println("\nFinished rendering frames.")
 

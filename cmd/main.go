@@ -1,4 +1,3 @@
-// richinsley/goshadertoy/goshadertoy-5ec5c80e8130811a9646c9bd6d1bbcbd07e1bb4d/cmd/main.go
 package main
 
 import (
@@ -7,6 +6,7 @@ import (
 	"log"
 	"os"
 	"runtime"
+	"strings"
 
 	api "github.com/richinsley/goshadertoy/api"
 	renderer "github.com/richinsley/goshadertoy/renderer"
@@ -15,7 +15,13 @@ import (
 func runShadertoy(shaderArgs *api.ShaderArgs, options *renderer.ShaderOptions) {
 	// Initialize renderer
 	// If recording, the window will be hidden (headless mode)
-	r, err := renderer.NewRenderer(*options.Width, *options.Height, !*options.Record, *options.BitDepth)
+	mode := *options.Mode
+	isRecord := false
+	if mode == "record" || mode == "stream" {
+		isRecord = true
+	}
+
+	r, err := renderer.NewRenderer(*options.Width, *options.Height, !isRecord, *options.BitDepth)
 	if err != nil {
 		log.Fatalf("Failed to create renderer: %v", err)
 	}
@@ -27,7 +33,8 @@ func runShadertoy(shaderArgs *api.ShaderArgs, options *renderer.ShaderOptions) {
 		log.Fatalf("Failed to initialize scene: %v", err)
 	}
 
-	if *options.Record {
+	switch mode {
+	case "record":
 		// Start the offscreen render loop
 		log.Println("Starting offscreen render loop...")
 		err = r.RunOffscreen(options)
@@ -35,7 +42,16 @@ func runShadertoy(shaderArgs *api.ShaderArgs, options *renderer.ShaderOptions) {
 			log.Fatalf("Offscreen rendering failed: %v", err)
 		}
 		log.Printf("Successfully rendered to %s", *options.OutputFile)
-	} else {
+	case "stream":
+		// Add streaming logic here
+		log.Println("Starting streaming mode...")
+		err = r.RunOffscreen(options)
+		if err != nil {
+			log.Fatalf("Offscreen rendering failed: %v", err)
+		}
+	case "live":
+		fallthrough
+	default:
 		// Start the interactive render loop
 		log.Println("Starting interactive render loop...")
 		r.Run()
@@ -53,8 +69,8 @@ func main() {
 	options.ShaderID = flag.String("shader", "XlSSzV", "Shadertoy shader ID")
 	options.Help = flag.Bool("help", false, "Show help message")
 
-	// Recording flags
-	options.Record = flag.Bool("record", false, "Enable recording mode")
+	// Mode flag - replaces the record flag
+	options.Mode = flag.String("mode", "Live", "Rendering mode: Live, Record, or Stream (case-insensitive)")
 	options.Duration = flag.Float64("duration", 10.0, "Duration to record in seconds")
 	options.FPS = flag.Int("fps", 60, "Frames per second for recording")
 	options.Width = flag.Int("width", 1280, "Width of the output")
@@ -62,6 +78,7 @@ func main() {
 	options.BitDepth = flag.Int("bitdepth", 8, "Bit depth for recording (8, 10, or 12)")
 	options.OutputFile = flag.String("output", "output.mp4", "Output file name for recording")
 	options.FFMPEGPath = flag.String("ffmpeg", "", "Path to ffmpeg executable")
+	options.Codec = flag.String("codec", "h264", "Video codec for encoding: h264, hevc (default: h264)")
 	options.DecklinkDevice = flag.String("decklink", "", "DeckLink device name for output")
 
 	flag.Parse()
@@ -72,6 +89,20 @@ func main() {
 		return
 	}
 
+	// Validate mode (case-insensitive)
+	*options.Mode = strings.ToLower(*options.Mode)
+	validModes := map[string]bool{"live": true, "record": true, "stream": true}
+	if !validModes[*options.Mode] {
+		log.Fatalf("Invalid mode: %s. Valid modes are: Live, Record, Stream (case-insensitive)", *options.Mode)
+	}
+
+	// Validate codec
+	*options.Codec = strings.ToLower(*options.Codec)
+	validCodecs := map[string]bool{"h264": true, "hevc": true}
+	if !validCodecs[*options.Codec] {
+		log.Fatalf("Invalid codec: %s. Valid codecs are: h264, hevc", *options.Codec)
+	}
+	
 	finalAPIKey := *options.APIKey
 	if finalAPIKey == "" {
 		finalAPIKey = os.Getenv("SHADERTOY_KEY")
