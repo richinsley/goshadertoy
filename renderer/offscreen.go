@@ -4,9 +4,8 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"os"
-	"os/exec"
 	"runtime"
+	"time"
 	"unsafe"
 
 	gl "github.com/go-gl/gl/v4.1-core/gl"
@@ -20,18 +19,23 @@ import (
 */
 import "C"
 
+// Frame represents a single rendered frame's data, ready for encoding.
+type Frame struct {
+	Pixels []byte
+	PTS    int64
+}
+
 type OffscreenRenderer struct {
 	fbo               uint32
 	textureID         uint32
 	depthRenderbuffer uint32
-	// Add a second FBO and texture for the vertical flip blit
-	blitFbo       uint32
-	blitTextureID uint32
-	width         int
-	height        int
-	pbos          [2]uint32 // For double-buffering PBOs
-	pboIndex      int       // Index to track which PBO is currently in use
-	bitDepth      int
+	blitFbo           uint32
+	blitTextureID     uint32
+	width             int
+	height            int
+	pbos              []uint32 // Use a slice for a variable number of PBOs
+	pboIndex          int      // Index to track which PBO is currently in use
+	bitDepth          int
 }
 
 var havesetoptions = false
@@ -41,41 +45,37 @@ func getFormatForBitDepth(bitDepth int) (glpixelFormat uint32, glpixelType uint3
 	// Read pixels in BGRA format to match what many video encoders expect
 	glpixelFormat = gl.BGRA
 
-	// AV_PIX_FMT_RGBA 		26
-	// AV_PIX_FMT_BGRA 		28
-	// AV_PIX_FMT_P010LE 	158
-	// AV_PIX_FMT_BGRA64BE 	106
-	// AV_PIX_FMT_BGRA64LE 	107
-
 	switch bitDepth {
 	case 10, 12:
-		// For 10/12-bit, we render to a 16-bit float texture and tell FFmpeg to encode to p010le
-		return glpixelFormat, gl.UNSIGNED_SHORT, 107, "p010le"
+		// For 10/12-bit, we render to a 16-bit float texture and read back as 16-bit half-floats.
+		return glpixelFormat, gl.HALF_FLOAT, 107, "p010le"
 	default: // 8-bit
 		return gl.BGRA, gl.UNSIGNED_BYTE, 28, "yuv420p"
 	}
 }
 
-func NewOffscreenRenderer(width, height, bitDepth int) (*OffscreenRenderer, error) {
+func NewOffscreenRenderer(width, height, bitDepth, numPBOs int) (*OffscreenRenderer, error) {
+	if numPBOs < 2 {
+		return nil, fmt.Errorf("number of PBOs must be at least 2")
+	}
+
 	or := &OffscreenRenderer{
 		width:    width,
 		height:   height,
 		bitDepth: bitDepth,
+		pbos:     make([]uint32, numPBOs),
 	}
 
 	var internalColorFormat int32
-	var internalDepthFormat uint32
 	var colorTextureType uint32
 
 	if bitDepth > 8 {
 		log.Println("Offscreen FBO: Using 16-bit float format for HDR.")
 		internalColorFormat = gl.RGBA16F
-		internalDepthFormat = gl.DEPTH_COMPONENT24
 		colorTextureType = gl.FLOAT
 	} else {
 		log.Println("Offscreen FBO: Using 8-bit format for SDR.")
 		internalColorFormat = gl.RGBA8
-		internalDepthFormat = gl.DEPTH_COMPONENT16
 		colorTextureType = gl.UNSIGNED_BYTE
 	}
 
@@ -90,7 +90,7 @@ func NewOffscreenRenderer(width, height, bitDepth int) (*OffscreenRenderer, erro
 	gl.FramebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, or.textureID, 0)
 	gl.GenRenderbuffers(1, &or.depthRenderbuffer)
 	gl.BindRenderbuffer(gl.RENDERBUFFER, or.depthRenderbuffer)
-	gl.RenderbufferStorage(gl.RENDERBUFFER, internalDepthFormat, int32(width), int32(height))
+	gl.RenderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT24, int32(width), int32(height))
 	gl.FramebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, or.depthRenderbuffer)
 	if gl.CheckFramebufferStatus(gl.FRAMEBUFFER) != gl.FRAMEBUFFER_COMPLETE {
 		return nil, fmt.Errorf("main offscreen fbo is not complete")
@@ -110,7 +110,7 @@ func NewOffscreenRenderer(width, height, bitDepth int) (*OffscreenRenderer, erro
 	}
 
 	// --- PBO Initialization ---
-	gl.GenBuffers(2, &or.pbos[0])
+	gl.GenBuffers(int32(len(or.pbos)), &or.pbos[0])
 	_, pixelType, _, _ := getFormatForBitDepth(bitDepth)
 	var bytesPerPixel int
 	switch pixelType {
@@ -122,10 +122,10 @@ func NewOffscreenRenderer(width, height, bitDepth int) (*OffscreenRenderer, erro
 		return nil, fmt.Errorf("unsupported pixel type for PBO sizing: %v", pixelType)
 	}
 	bufferSize := width * height * bytesPerPixel
-	gl.BindBuffer(gl.PIXEL_PACK_BUFFER, or.pbos[0])
-	gl.BufferData(gl.PIXEL_PACK_BUFFER, bufferSize, nil, gl.STREAM_READ)
-	gl.BindBuffer(gl.PIXEL_PACK_BUFFER, or.pbos[1])
-	gl.BufferData(gl.PIXEL_PACK_BUFFER, bufferSize, nil, gl.STREAM_READ)
+	for i := 0; i < len(or.pbos); i++ {
+		gl.BindBuffer(gl.PIXEL_PACK_BUFFER, or.pbos[i])
+		gl.BufferData(gl.PIXEL_PACK_BUFFER, bufferSize, nil, gl.STREAM_READ)
+	}
 
 	gl.BindBuffer(gl.PIXEL_PACK_BUFFER, 0)
 	gl.BindFramebuffer(gl.FRAMEBUFFER, 0)
@@ -138,21 +138,26 @@ func (or *OffscreenRenderer) Destroy() {
 	gl.DeleteRenderbuffers(1, &or.depthRenderbuffer)
 	gl.DeleteFramebuffers(1, &or.blitFbo)
 	gl.DeleteTextures(1, &or.blitTextureID)
-	gl.DeleteBuffers(2, &or.pbos[0])
+	gl.DeleteBuffers(int32(len(or.pbos)), &or.pbos[0])
 }
 
 func (or *OffscreenRenderer) readPixelsAsync(width, height int) ([]byte, error) {
 	currentPboIndex := or.pboIndex
-	nextPboIndex := (or.pboIndex + 1) % 2
+	nextPboIndex := (or.pboIndex + 1) % len(or.pbos)
 
 	pixelFormat, pixelType, _, _ := getFormatForBitDepth(or.bitDepth)
-	bytesPerPixel := 4
-	if pixelType == gl.HALF_FLOAT || pixelType == gl.UNSIGNED_SHORT {
+	var bytesPerPixel int
+	switch pixelType {
+	case gl.UNSIGNED_BYTE:
+		bytesPerPixel = 4
+	case gl.UNSIGNED_SHORT, gl.HALF_FLOAT:
 		bytesPerPixel = 8
+	default:
+		return nil, fmt.Errorf("unsupported pixel type")
 	}
+
 	bufferSize := int32(width * height * bytesPerPixel)
 
-	// Reads from the FBO bound to GL_READ_FRAMEBUFFER by the caller
 	gl.BindBuffer(gl.PIXEL_PACK_BUFFER, or.pbos[currentPboIndex])
 	gl.ReadPixels(0, 0, int32(width), int32(height), pixelFormat, pixelType, nil)
 
@@ -175,123 +180,258 @@ func (or *OffscreenRenderer) readPixelsAsync(width, height int) ([]byte, error) 
 }
 
 func (r *Renderer) getArgs(options *ShaderOptions, ffmpegOutPixFmt string) (inputArgs ffmpeg.KwArgs, outputArgs ffmpeg.KwArgs) {
-	// Prepare input arguments for FFmpeg
-	inputArgs = ffmpeg.KwArgs{
-		"f": "shm_demuxer",
-	}
-
-	// set colorimetry options based on bit depth
+	inputArgs = ffmpeg.KwArgs{"f": "shm_demuxer"}
 	if *options.BitDepth > 8 {
 		inputArgs["color_primaries"] = "bt2020"
 		inputArgs["color_trc"] = "linear"
 	}
 
 	outputArgs = ffmpeg.KwArgs{}
-	if *options.Codec == "hevc" {
+	switch *options.Codec {
+	case "hevc":
 		switch runtime.GOOS {
-		case "windows":
-			outputArgs["c:v"] = "hevc_nvenc" // Use NVENC on Windows for HEVC
-		case "linux":
-			outputArgs["c:v"] = "hevc_nvenc" // Use NVENC on Linux for HEVC
-		case "darwin": // macOS
-			outputArgs["c:v"] = "hevc_videotoolbox" // Use VideoToolbox on macOS for HEVC
+		case "windows", "linux":
+			outputArgs["c:v"] = "hevc_nvenc"
+		case "darwin":
+			outputArgs["c:v"] = "hevc_videotoolbox"
 		default:
 			outputArgs["c:v"] = "libx265" // Fallback to software encoding
 		}
-	} else if *options.Codec == "h264" {
+	case "h264":
 		switch runtime.GOOS {
-		case "windows":
-			outputArgs["c:v"] = "h264_nvenc" // Use NVENC on Windows for H.264
-		case "linux":
-			outputArgs["c:v"] = "h264_nvenc" // Use NVENC on Linux for H.264
-		case "darwin": // macOS
-			outputArgs["c:v"] = "h264_videotoolbox" // Use VideoToolbox on macOS for H.264
+		case "windows", "linux":
+			outputArgs["c:v"] = "h264_nvenc"
+		case "darwin":
+			outputArgs["c:v"] = "h264_videotoolbox"
 		default:
 			outputArgs["c:v"] = "libx264" // Fallback to software encoding
 		}
-	} else {
-		log.Printf("Unsupported codec: %s. Defaulting to H.264 with libx264.", *options.Codec)
-		outputArgs["c:v"] = "libx264" // Default to H.264 software encoding
 	}
 
-	// Set common output arguments
-	outputArgs["b:v"] = "25M" // Set video bitrate
-
-	outputArgs["pix_fmt"] = ffmpegOutPixFmt // Set pixel format for output
+	outputArgs["b:v"] = "25M"
+	outputArgs["pix_fmt"] = ffmpegOutPixFmt
 
 	// if we are recording to mp4 or mov with HEVC, we need to set the tag to hvc1 for quicktime compatibility
 	if *options.Codec == "hevc" && *options.Mode == "record" {
 		path := *options.OutputFile
-		if path[len(path)-4:] != ".mp4" && path[len(path)-4:] != ".mov" {
-			outputArgs["tag:v"] = "hvc1" // Use hvc1 for HEVC encoding for quicktime compatibility
+		if path[len(path)-4:] == ".mp4" || path[len(path)-4:] == ".mov" {
+			outputArgs["tag:v"] = "hvc1"
 		}
 	}
 
 	// for stream mode, we always set the output format to mpegts
 	if *options.Mode == "stream" {
-		outputArgs["f"] = "mpegts" // Set output format to MPEG-TS for streaming
+		outputArgs["f"] = "mpegts"
 	}
-	/*
-		inputArgs := ffmpeg.KwArgs{"f": "shm_demuxer"}
-		outputArgs := ffmpeg.KwArgs{
-			// "c:v":     "hevc_videotoolbox",
-			"c:v":     "hevc_nvenc",
-			"b:v":     "25M",
-			"pix_fmt": ffmpegOutPixFmt,
-			"tag:v":   "hvc1", // <= Use hvc1 for HEVC encoding for quicktime compatibility
-			// "movflags": "+faststart",
+
+	// // When HDR enabled and in high bit depth mode, tag both the input and output streams correctly.
+	// if r.offscreenRenderer.bitDepth > 8 {
+	// 	// Tag the INPUT stream as linear light
+	// 	inputArgs["color_primaries"] = "bt2020"
+	// 	inputArgs["color_trc"] = "linear"
+	// 	// inputArgs["colorspace"] = "bt2020"
+
+	// 	// Tag the OUTPUT stream for HDR display
+	// 	outputArgs["color_primaries"] = "bt2020"
+	// 	outputArgs["color_trc"] = "smpte2084" // PQ (HDR10)
+	// 	outputArgs["colorspace"] = "bt2020nc"
+	//
+
+	return
+}
+
+func (r *Renderer) runEncoder(options *ShaderOptions, frameChan <-chan *Frame, doneChan chan<- error) {
+	shmNameStr := "/goshadertoy"
+	bytesPerPixel := 4
+	if r.offscreenRenderer.bitDepth > 8 {
+		bytesPerPixel = 8
+	}
+	shmSize := *options.Width * *options.Height * bytesPerPixel
+
+	shm, err := sharedmemory.CreateSharedMemory(shmNameStr, shmSize)
+	if err != nil {
+		doneChan <- fmt.Errorf("failed to create shared memory: %w", err)
+		return
+	}
+	defer shm.Close()
+
+	header := C.SHMHeader{}
+	shmFilePtr := (*[512]C.char)(unsafe.Pointer(&header.shm_file))
+	shmFilePtr[0] = '/'
+	for i := 0; i < len(shmNameStr) && i < 511; i++ {
+		shmFilePtr[i+1] = C.char(shmNameStr[i])
+	}
+	shmFilePtr[len(shmNameStr)+1] = 0
+
+	_, _, ffmpegInPixFmt, ffmpegOutPixFmt := getFormatForBitDepth(r.offscreenRenderer.bitDepth)
+	header.width = C.uint32_t(*options.Width)
+	header.height = C.uint32_t(*options.Height)
+	header.frame_rate = C.uint32_t(*options.FPS)
+	header.pix_fmt = C.int32_t(ffmpegInPixFmt)
+	headerBytes := (*[unsafe.Sizeof(header)]byte)(unsafe.Pointer(&header))[:]
+
+	pipeReader, pipeWriter := io.Pipe()
+	inputArgs, outputArgs := r.getArgs(options, ffmpegOutPixFmt)
+
+	ffmpegCmd := ffmpeg.Input("pipe:", inputArgs).
+		Output(*options.OutputFile, outputArgs).
+		OverWriteOutput().WithInput(pipeReader).ErrorToStdOut()
+
+	if *options.FFMPEGPath != "" {
+		ffmpegCmd = ffmpegCmd.SetFfmpegPath(*options.FFMPEGPath)
+	}
+
+	errc := make(chan error, 1)
+	go func() {
+		errc <- ffmpegCmd.Run()
+	}()
+
+	if _, err := pipeWriter.Write(headerBytes); err != nil {
+		doneChan <- fmt.Errorf("failed to write header to FFmpeg: %w", err)
+		return
+	}
+
+	ticker := time.NewTicker(time.Second / time.Duration(*options.FPS))
+	defer ticker.Stop()
+
+	var latestFrame *Frame
+	var encoderPTS int64 = 0
+
+	for {
+		select {
+		case <-ticker.C:
+			select {
+			case newFrame, ok := <-frameChan:
+				if !ok {
+					goto endLoop
+				}
+				latestFrame = newFrame
+			default:
+				if latestFrame == nil {
+					continue
+				}
+			}
+
+			if _, err := shm.WriteAt(latestFrame.Pixels, 0); err != nil {
+				log.Printf("Error writing pixel data on frame %d: %v", encoderPTS, err)
+				break
+			}
+
+			frameHeader := C.FrameHeader{
+				cmdtype: C.uint32_t(0),
+				size:    C.uint32_t(len(latestFrame.Pixels)),
+				pts:     C.int64_t(encoderPTS),
+			}
+			encoderPTS++
+
+			frameHeaderBytes := (*[unsafe.Sizeof(frameHeader)]byte)(unsafe.Pointer(&frameHeader))[:]
+			if _, err := pipeWriter.Write(frameHeaderBytes); err != nil {
+				break
+			}
+		case err := <-errc:
+			doneChan <- err
+			return
 		}
-	*/
+	}
 
-	/*
-		outputArgs := ffmpeg.KwArgs{
-			// "c:v":     "hevc_videotoolbox",
-			"c:v":     "hevc_nvenc",
-			"b:v":     "25M",
-			"pix_fmt": ffmpegOutPixFmt,
-			"f":       "mpegts", // Output format
-			// "tag:v":   "hvc1", // <= Use hvc1 for HEVC encoding for quicktime compatibility
-			// "movflags": "+faststart",
-		}
-
-		// // When HDR enabled and in high bit depth mode, tag both the input and output streams correctly.
-		// if r.offscreenRenderer.bitDepth > 8 {
-		// 	// Tag the INPUT stream as linear light
-		// 	inputArgs["color_primaries"] = "bt2020"
-		// 	inputArgs["color_trc"] = "linear"
-		// 	// inputArgs["colorspace"] = "bt2020"
-
-		// 	// Tag the OUTPUT stream for HDR display
-		// 	outputArgs["color_primaries"] = "bt2020"
-		// 	outputArgs["color_trc"] = "smpte2084" // PQ (HDR10)
-		// 	outputArgs["colorspace"] = "bt2020nc"
-		// }
-	*/
-
-	return inputArgs, outputArgs
+endLoop:
+	eofHeader := C.FrameHeader{cmdtype: C.uint32_t(2)}
+	eofHeaderBytes := (*[unsafe.Sizeof(eofHeader)]byte)(unsafe.Pointer(&eofHeader))[:]
+	if _, err := pipeWriter.Write(eofHeaderBytes); err != nil {
+		log.Printf("Error writing EOF header to FFmpeg: %v", err)
+	}
+	pipeWriter.Close()
+	doneChan <- <-errc
 }
 
 func (r *Renderer) RunOffscreen(options *ShaderOptions) error {
-	shmNameStr := "/goshadertoy"
-
-	// calculate bytes per pixel based on bit depth.
-	bytesPerPixel := 4 // Default for 8-bit RGBA
-	if r.offscreenRenderer.bitDepth > 8 {
-		bytesPerPixel = 8 // For 10/12-bit HDR (using 16-bit float textures)
+	if *options.Mode == "stream" {
+		return r.runStreamMode(options)
 	}
-	frameSize := *options.Width * *options.Height * bytesPerPixel
+	return r.runRecordMode(options)
+}
 
-	// The shared memory only needs to be large enough for a single frame of pixel data.
-	shmSize := frameSize
+func (r *Renderer) runStreamMode(options *ShaderOptions) error {
+	log.Println("Starting in stream mode...")
+	frameChan := make(chan *Frame, len(r.offscreenRenderer.pbos))
+	encoderDoneChan := make(chan error, 1)
 
-	// Create shared memory using the wrapper
+	go r.runEncoder(options, frameChan, encoderDoneChan)
+
+	if *options.Prewarm {
+		log.Println("Pre-warming renderer...")
+		for i := 0; i < len(r.offscreenRenderer.pbos)*2; i++ {
+			r.RenderFrame(0, int32(i), [4]float32{0, 0, 0, 0}, &inputs.Uniforms{})
+		}
+		log.Println("Pre-warming complete.")
+	}
+
+	startTime := time.Now()
+	frameDuration := time.Second / time.Duration(*options.FPS)
+	var frameCounter int64 = 0
+
+	for {
+		elapsedTime := time.Since(startTime)
+		shouldHaveRendered := int64(float64(elapsedTime) / float64(frameDuration))
+
+		if frameCounter >= shouldHaveRendered {
+			time.Sleep(1 * time.Millisecond)
+			continue
+		}
+
+		for frameCounter < shouldHaveRendered {
+			simTime := float64(frameCounter) * frameDuration.Seconds()
+
+			uniforms := &inputs.Uniforms{
+				Time:      float32(simTime),
+				TimeDelta: float32(frameDuration.Seconds()),
+				FrameRate: float32(*options.FPS),
+				Frame:     int32(frameCounter),
+			}
+
+			r.RenderFrame(simTime, int32(frameCounter), [4]float32{0, 0, 0, 0}, uniforms)
+
+			gl.BindFramebuffer(gl.FRAMEBUFFER, r.offscreenRenderer.blitFbo)
+			gl.Clear(gl.COLOR_BUFFER_BIT)
+			gl.UseProgram(r.blitProgram)
+			gl.ActiveTexture(gl.TEXTURE0)
+			gl.BindTexture(gl.TEXTURE_2D, r.offscreenRenderer.textureID)
+			gl.BindVertexArray(r.quadVAO)
+			gl.DrawArrays(gl.TRIANGLES, 0, 6)
+
+			gl.BindFramebuffer(gl.READ_FRAMEBUFFER, r.offscreenRenderer.blitFbo)
+			pixels, err := r.offscreenRenderer.readPixelsAsync(*options.Width, *options.Height)
+			gl.BindFramebuffer(gl.READ_FRAMEBUFFER, 0)
+
+			if err != nil {
+				log.Printf("Error reading pixels on frame %d: %v", frameCounter, err)
+				close(frameChan)
+				return <-encoderDoneChan
+			}
+
+			frameChan <- &Frame{Pixels: pixels, PTS: frameCounter}
+			frameCounter++
+		}
+	}
+}
+
+func (r *Renderer) runRecordMode(options *ShaderOptions) error {
+	log.Println("Starting in record mode...")
+	totalFrames := int(*options.Duration * float64(*options.FPS))
+	shmNameStr := "/goshadertoy"
+	bytesPerPixel := 4
+	if r.offscreenRenderer.bitDepth > 8 {
+		bytesPerPixel = 8
+	}
+	shmSize := *options.Width * *options.Height * bytesPerPixel
+
 	shm, err := sharedmemory.CreateSharedMemory(shmNameStr, shmSize)
 	if err != nil {
 		return fmt.Errorf("failed to create shared memory: %w", err)
 	}
 	defer shm.Close()
 
-	// --- Prepare the main SHMHeader ---
+	// Prepare the main SHMHeader
 	header := C.SHMHeader{}
 
 	// Get a pointer to the shm_file field
@@ -307,21 +447,16 @@ func (r *Renderer) RunOffscreen(options *ShaderOptions) error {
 	shmFilePtr[len(shmNameStr)+1] = 0 // null-terminate
 
 	_, _, ffmpegInPixFmt, ffmpegOutPixFmt := getFormatForBitDepth(r.offscreenRenderer.bitDepth)
-
 	header.width = C.uint32_t(*options.Width)
 	header.height = C.uint32_t(*options.Height)
 	header.frame_rate = C.uint32_t(*options.FPS)
-
-	header.pix_fmt = C.int32_t(ffmpegInPixFmt) // This is the pixel format for FFmpeg input that matches the GL format.
+	header.pix_fmt = C.int32_t(ffmpegInPixFmt)
 	headerBytes := (*[unsafe.Sizeof(header)]byte)(unsafe.Pointer(&header))[:]
 
 	// setup FFmpeg with a pipe for control data
 	pipeReader, pipeWriter := io.Pipe()
-
-	// get the input and output arguments for FFmpeg
 	inputArgs, outputArgs := r.getArgs(options, ffmpegOutPixFmt)
 
-	log.Printf("Recording to output file: %s with pix_fmt: %s", *options.OutputFile, ffmpegOutPixFmt)
 	ffmpegCmd := ffmpeg.Input("pipe:", inputArgs).
 		Output(*options.OutputFile, outputArgs).
 		OverWriteOutput().WithInput(pipeReader).ErrorToStdOut()
@@ -330,43 +465,17 @@ func (r *Renderer) RunOffscreen(options *ShaderOptions) error {
 		ffmpegCmd = ffmpegCmd.SetFfmpegPath(*options.FFMPEGPath)
 	}
 
-	if !havesetoptions {
-		ffmpeg.GlobalCommandOptions = append(ffmpeg.GlobalCommandOptions, func(cmd *exec.Cmd) {
-			cmd.Env = os.Environ()
-		})
-		havesetoptions = true
-	}
-
 	errc := make(chan error, 1)
 	go func() {
-		log.Println("Starting FFmpeg...")
 		errc <- ffmpegCmd.Run()
-		log.Println("FFmpeg finished.")
 	}()
 
-	// Write the initial header to the pipe so the demuxer can start.
 	if _, err := pipeWriter.Write(headerBytes); err != nil {
 		return fmt.Errorf("failed to write header to FFmpeg: %w", err)
 	}
 
-	totalFrames := 0
-	renderForever := *options.Mode == "stream"
-	if !renderForever {
-		totalFrames = int(*options.Duration * float64(*options.FPS))
-		log.Printf("Starting to render %d frames...", totalFrames)
-	} else {
-		log.Println("Starting to render frames indefinitely...")
-	}
-
 	timeStep := 1.0 / float64(*options.FPS)
-
-	log.Printf("Starting to render %d frames...", totalFrames)
-	for i := 0; ; i++ {
-		// If not rendering forever, check if we have rendered all the frames.
-		if !renderForever && i >= totalFrames {
-			break
-		}
-
+	for i := 0; i < totalFrames; i++ {
 		currentTime := float64(i) * timeStep
 		uniforms := &inputs.Uniforms{
 			Time:      float32(currentTime),
@@ -392,27 +501,19 @@ func (r *Renderer) RunOffscreen(options *ShaderOptions) error {
 		// Read the pixels from the blit FBO, which now contains the flipped image
 		gl.BindFramebuffer(gl.READ_FRAMEBUFFER, r.offscreenRenderer.blitFbo)
 		pixels, err := r.offscreenRenderer.readPixelsAsync(*options.Width, *options.Height)
-		gl.BindFramebuffer(gl.READ_FRAMEBUFFER, 0) // Unbind
+		gl.BindFramebuffer(gl.READ_FRAMEBUFFER, 0)
 
 		if err != nil {
-			log.Printf("Error reading pixels on frame %d: %v", i, err)
 			break
-		}
-
-		if len(pixels) != frameSize {
-			log.Printf("Error: pixel buffer size mismatch on frame %d. Expected %d, got %d", i, frameSize, len(pixels))
-			continue
 		}
 
 		// Write the latest pixel data to the start of the shared memory buffer.
 		if _, err := shm.WriteAt(pixels, 0); err != nil {
-			log.Printf("Error writing pixel data on frame %d: %v", i, err)
 			break
 		}
 
-		// Prepare the frame header to send down the pipe.
 		frameHeader := C.FrameHeader{
-			cmdtype: C.uint32_t(0), // 0 for video
+			cmdtype: C.uint32_t(0),
 			size:    C.uint32_t(len(pixels)),
 			pts:     C.int64_t(i),
 		}
@@ -420,29 +521,14 @@ func (r *Renderer) RunOffscreen(options *ShaderOptions) error {
 
 		// Write the frame header to the pipe to signal a new frame is ready.
 		if _, err := pipeWriter.Write(frameHeaderBytes); err != nil {
-			log.Printf("Error writing frame header to FFmpeg on frame %d: %v", i, err)
 			break
 		}
 	}
-	fmt.Println("\nFinished rendering frames.")
 
 	// Send the EOF command down the pipe.
-	eofHeader := C.FrameHeader{
-		cmdtype: C.uint32_t(2), // 2 for EOF
-		size:    0,
-		pts:     0,
-	}
+	eofHeader := C.FrameHeader{cmdtype: C.uint32_t(2)}
 	eofHeaderBytes := (*[unsafe.Sizeof(eofHeader)]byte)(unsafe.Pointer(&eofHeader))[:]
-	if _, err := pipeWriter.Write(eofHeaderBytes); err != nil {
-		log.Printf("Error writing EOF header to FFmpeg: %v", err)
-	}
-
-	log.Println("Closing FFmpeg pipe writer to signal end of stream...")
+	pipeWriter.Write(eofHeaderBytes)
 	pipeWriter.Close()
-
-	// Wait for FFmpeg to finish processing.
-	log.Println("Waiting for FFmpeg process to exit...")
-	err = <-errc
-	log.Println("FFmpeg process has exited.")
-	return err
+	return <-errc
 }

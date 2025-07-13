@@ -14,4 +14,6 @@ type ShaderOptions struct {
 	FFMPEGPath     *string
 	DecklinkDevice *string
 	Codec          *string
+	NumPBOs        *int
+	Prewarm        *bool // Optional prewarm flag to initialize the renderer before recording/streaming
 }

@@ -24,7 +24,7 @@ type Renderer struct {
 	recordMode        bool
 }
 
-func NewRenderer(width, height int, visible bool, bitDepth int) (*Renderer, error) {
+func NewRenderer(width, height int, visible bool, bitDepth int, numPBOs int) (*Renderer, error) {
 	r := &Renderer{
 		width:      width,
 		height:     height,
@@ -42,7 +42,7 @@ func NewRenderer(width, height int, visible bool, bitDepth int) (*Renderer, erro
 		return nil, fmt.Errorf("failed to initialize graphics context: %w", err)
 	}
 
-	r.offscreenRenderer, err = NewOffscreenRenderer(r.width, r.height, bitDepth)
+	r.offscreenRenderer, err = NewOffscreenRenderer(r.width, r.height, bitDepth, numPBOs)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create offscreen renderer: %w", err)
 	}
@@ -67,7 +67,9 @@ func (r *Renderer) Shutdown() {
 		}
 	}
 	gl.DeleteProgram(r.blitProgram)
-	r.offscreenRenderer.Destroy()
+	if r.offscreenRenderer != nil {
+		r.offscreenRenderer.Destroy()
+	}
 	gl.DeleteVertexArrays(1, &r.quadVAO)
 	if r.context != nil {
 		r.context.Shutdown()

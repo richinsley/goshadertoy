@@ -21,7 +21,7 @@ func runShadertoy(shaderArgs *api.ShaderArgs, options *renderer.ShaderOptions) {
 		isRecord = true
 	}
 
-	r, err := renderer.NewRenderer(*options.Width, *options.Height, !isRecord, *options.BitDepth)
+	r, err := renderer.NewRenderer(*options.Width, *options.Height, !isRecord, *options.BitDepth, *options.NumPBOs)
 	if err != nil {
 		log.Fatalf("Failed to create renderer: %v", err)
 	}
@@ -80,6 +80,8 @@ func main() {
 	options.FFMPEGPath = flag.String("ffmpeg", "", "Path to ffmpeg executable")
 	options.Codec = flag.String("codec", "h264", "Video codec for encoding: h264, hevc (default: h264)")
 	options.DecklinkDevice = flag.String("decklink", "", "DeckLink device name for output")
+	options.NumPBOs = flag.Int("numpbos", 2, "Number of PBOs to use for streaming")
+	options.Prewarm = flag.Bool("prewarm", false, "Prewarm the renderer before recording/streaming (optional)")
 
 	flag.Parse()
 
@@ -102,7 +104,7 @@ func main() {
 	if !validCodecs[*options.Codec] {
 		log.Fatalf("Invalid codec: %s. Valid codecs are: h264, hevc", *options.Codec)
 	}
-	
+
 	finalAPIKey := *options.APIKey
 	if finalAPIKey == "" {
 		finalAPIKey = os.Getenv("SHADERTOY_KEY")
