@@ -22,6 +22,8 @@ type Renderer struct {
 	buffers           map[string]*inputs.Buffer
 	offscreenRenderer *OffscreenRenderer
 	blitProgram       uint32
+	yuvProgram        uint32
+	yuvBitDepthLoc    int32
 	width             int
 	height            int
 	recordMode        bool
@@ -74,6 +76,7 @@ func (r *Renderer) Shutdown() {
 		}
 	}
 	gl.DeleteProgram(r.blitProgram)
+	gl.DeleteProgram(r.yuvProgram)
 	if r.offscreenRenderer != nil {
 		r.offscreenRenderer.Destroy()
 	}

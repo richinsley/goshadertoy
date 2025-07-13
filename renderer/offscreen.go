@@ -36,24 +36,29 @@ type OffscreenRenderer struct {
 	pbos              []uint32 // Use a slice for a variable number of PBOs
 	pboIndex          int      // Index to track which PBO is currently in use
 	bitDepth          int
+	yuvFbo            uint32
+	yuvTextureIDs     [3]uint32
 }
 
 var havesetoptions = false
 
 // getFormatForBitDepth controls the pixel format for FFmpeg readback.
-func getFormatForBitDepth(bitDepth int) (glpixelFormat uint32, glpixelType uint32, ffmpegInPixFmt int, ffmpegOutPixFmt string) {
-	// Read pixels in BGRA format to match what many video encoders expect
-	glpixelFormat = gl.BGRA
+func getFormatForBitDepth(bitDepth int) (glInternalFormat int32, glpixelFormat uint32, glpixelType uint32, ffmpegInPixFmt int, ffmpegOutPixFmt string) {
+	// Read pixels in a planar YUV format
+	ffmpegOutPixFmt = "yuv444p"
 
+	// AV_PIX_FMT_YUV444P 		5
+	// AV_PIX_FMT_YUV444P10LE	68
+	// AV_PIX_FMT_YUV444P10BE	67
 	switch bitDepth {
 	case 10, 12:
-		// For 10/12-bit, we render to a 16-bit float texture and read back as 16-bit half-floats.
-		return glpixelFormat, gl.HALF_FLOAT, 107, "p010le"
+		// For 10/12-bit, we render to a 16-bit unsigned integer texture and read back as 16-bit unsigned shorts.
+		// using full 444 for encoding breaks several decoders, so we'll use 422 instead for now.
+		return gl.R16UI, gl.RED_INTEGER, gl.UNSIGNED_SHORT, 68, "p010le" //"yuv444p10le"
 	default: // 8-bit
-		return gl.BGRA, gl.UNSIGNED_BYTE, 28, "yuv420p"
+		return gl.R8, gl.RED, gl.UNSIGNED_BYTE, 5, "nv12" //"yuv444p"
 	}
 }
-
 func NewOffscreenRenderer(width, height, bitDepth, numPBOs int) (*OffscreenRenderer, error) {
 	if numPBOs < 2 {
 		return nil, fmt.Errorf("number of PBOs must be at least 2")
@@ -63,7 +68,7 @@ func NewOffscreenRenderer(width, height, bitDepth, numPBOs int) (*OffscreenRende
 		width:    width,
 		height:   height,
 		bitDepth: bitDepth,
-		pbos:     make([]uint32, numPBOs),
+		pbos:     make([]uint32, numPBOs*3), // 3 PBOs per frame (Y, U, V)
 	}
 
 	var internalColorFormat int32
@@ -96,28 +101,37 @@ func NewOffscreenRenderer(width, height, bitDepth, numPBOs int) (*OffscreenRende
 		return nil, fmt.Errorf("main offscreen fbo is not complete")
 	}
 
-	// --- Create Blit FBO for flipping the image ---
-	gl.GenFramebuffers(1, &or.blitFbo)
-	gl.BindFramebuffer(gl.FRAMEBUFFER, or.blitFbo)
-	gl.GenTextures(1, &or.blitTextureID)
-	gl.BindTexture(gl.TEXTURE_2D, or.blitTextureID)
-	gl.TexImage2D(gl.TEXTURE_2D, 0, internalColorFormat, int32(width), int32(height), 0, gl.RGBA, colorTextureType, nil)
-	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
-	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
-	gl.FramebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, or.blitTextureID, 0)
+	// --- Create YUV FBO for conversion ---
+	gl.GenFramebuffers(1, &or.yuvFbo)
+	gl.BindFramebuffer(gl.FRAMEBUFFER, or.yuvFbo)
+	gl.GenTextures(3, &or.yuvTextureIDs[0])
+
+	yuvInternalFormat, yuvPixelFormat, yuvPixelType, _, _ := getFormatForBitDepth(bitDepth)
+
+	for i := 0; i < 3; i++ {
+		gl.BindTexture(gl.TEXTURE_2D, or.yuvTextureIDs[i])
+		gl.TexImage2D(gl.TEXTURE_2D, 0, yuvInternalFormat, int32(width), int32(height), 0, yuvPixelFormat, yuvPixelType, nil)
+		gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST)
+		gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST)
+		gl.FramebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0+uint32(i), gl.TEXTURE_2D, or.yuvTextureIDs[i], 0)
+	}
+
+	drawBuffers := []uint32{gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1, gl.COLOR_ATTACHMENT2}
+	gl.DrawBuffers(3, &drawBuffers[0])
+
 	if gl.CheckFramebufferStatus(gl.FRAMEBUFFER) != gl.FRAMEBUFFER_COMPLETE {
-		return nil, fmt.Errorf("blit fbo is not complete")
+		return nil, fmt.Errorf("yuv fbo is not complete")
 	}
 
 	// --- PBO Initialization ---
 	gl.GenBuffers(int32(len(or.pbos)), &or.pbos[0])
-	_, pixelType, _, _ := getFormatForBitDepth(bitDepth)
+	_, _, pixelType, _, _ := getFormatForBitDepth(bitDepth)
 	var bytesPerPixel int
 	switch pixelType {
 	case gl.UNSIGNED_BYTE:
-		bytesPerPixel = 4
-	case gl.UNSIGNED_SHORT, gl.HALF_FLOAT:
-		bytesPerPixel = 8
+		bytesPerPixel = 1
+	case gl.UNSIGNED_SHORT:
+		bytesPerPixel = 2
 	default:
 		return nil, fmt.Errorf("unsupported pixel type for PBO sizing: %v", pixelType)
 	}
@@ -136,54 +150,59 @@ func (or *OffscreenRenderer) Destroy() {
 	gl.DeleteFramebuffers(1, &or.fbo)
 	gl.DeleteTextures(1, &or.textureID)
 	gl.DeleteRenderbuffers(1, &or.depthRenderbuffer)
-	gl.DeleteFramebuffers(1, &or.blitFbo)
-	gl.DeleteTextures(1, &or.blitTextureID)
+	gl.DeleteFramebuffers(1, &or.yuvFbo)
+	gl.DeleteTextures(3, &or.yuvTextureIDs[0])
 	gl.DeleteBuffers(int32(len(or.pbos)), &or.pbos[0])
 }
 
-func (or *OffscreenRenderer) readPixelsAsync(width, height int) ([]byte, error) {
-	currentPboIndex := or.pboIndex
-	nextPboIndex := (or.pboIndex + 1) % len(or.pbos)
-
-	pixelFormat, pixelType, _, _ := getFormatForBitDepth(or.bitDepth)
+func (or *OffscreenRenderer) readYUVPixelsAsync(width, height int) ([]byte, error) {
+	_, pixelFormat, pixelType, _, _ := getFormatForBitDepth(or.bitDepth)
 	var bytesPerPixel int
 	switch pixelType {
 	case gl.UNSIGNED_BYTE:
-		bytesPerPixel = 4
-	case gl.UNSIGNED_SHORT, gl.HALF_FLOAT:
-		bytesPerPixel = 8
+		bytesPerPixel = 1
+	case gl.UNSIGNED_SHORT:
+		bytesPerPixel = 2
 	default:
 		return nil, fmt.Errorf("unsupported pixel type")
 	}
 
-	bufferSize := int32(width * height * bytesPerPixel)
+	bufferSize := width * height * bytesPerPixel
+	yuvData := make([]byte, bufferSize*3)
 
-	gl.BindBuffer(gl.PIXEL_PACK_BUFFER, or.pbos[currentPboIndex])
-	gl.ReadPixels(0, 0, int32(width), int32(height), pixelFormat, pixelType, nil)
+	for i := 0; i < 3; i++ {
+		pboIndex := (or.pboIndex + i) % len(or.pbos)
+		nextPboIndex := (or.pboIndex + i + 3) % len(or.pbos)
 
-	gl.BindBuffer(gl.PIXEL_PACK_BUFFER, or.pbos[nextPboIndex])
-	ptr := gl.MapBufferRange(gl.PIXEL_PACK_BUFFER, 0, int(bufferSize), gl.MAP_READ_BIT)
-	if ptr == nil {
-		gl.BindBuffer(gl.PIXEL_PACK_BUFFER, 0)
-		return nil, fmt.Errorf("failed to map PBO")
+		gl.ReadBuffer(gl.COLOR_ATTACHMENT0 + uint32(i))
+		gl.BindBuffer(gl.PIXEL_PACK_BUFFER, or.pbos[pboIndex])
+		gl.ReadPixels(0, 0, int32(width), int32(height), pixelFormat, pixelType, nil)
+
+		gl.BindBuffer(gl.PIXEL_PACK_BUFFER, or.pbos[nextPboIndex])
+		ptr := gl.MapBufferRange(gl.PIXEL_PACK_BUFFER, 0, bufferSize, gl.MAP_READ_BIT)
+		if ptr == nil {
+			gl.BindBuffer(gl.PIXEL_PACK_BUFFER, 0)
+			return nil, fmt.Errorf("failed to map PBO for plane %d", i)
+		}
+
+		pixelData := (*[1 << 30]byte)(ptr)[:bufferSize:bufferSize]
+		copy(yuvData[i*bufferSize:], pixelData)
+
+		gl.UnmapBuffer(gl.PIXEL_PACK_BUFFER)
 	}
 
-	dataCopy := make([]byte, bufferSize)
-	pixelData := (*[1 << 30]byte)(ptr)[:bufferSize:bufferSize]
-	copy(dataCopy, pixelData)
-
-	gl.UnmapBuffer(gl.PIXEL_PACK_BUFFER)
 	gl.BindBuffer(gl.PIXEL_PACK_BUFFER, 0)
-	or.pboIndex = nextPboIndex
+	or.pboIndex = (or.pboIndex + 3) % len(or.pbos)
 
-	return dataCopy, nil
+	return yuvData, nil
 }
 
 func (r *Renderer) getArgs(options *ShaderOptions, ffmpegOutPixFmt string) (inputArgs ffmpeg.KwArgs, outputArgs ffmpeg.KwArgs) {
 	inputArgs = ffmpeg.KwArgs{"f": "shm_demuxer"}
 	if *options.BitDepth > 8 {
 		inputArgs["color_primaries"] = "bt2020"
-		inputArgs["color_trc"] = "linear"
+		inputArgs["color_trc"] = "smpte2084" // PQ
+		inputArgs["colorspace"] = "bt2020nc"
 	}
 
 	outputArgs = ffmpeg.KwArgs{}
@@ -195,7 +214,7 @@ func (r *Renderer) getArgs(options *ShaderOptions, ffmpegOutPixFmt string) (inpu
 		case "darwin":
 			outputArgs["c:v"] = "hevc_videotoolbox"
 		default:
-			outputArgs["c:v"] = "libx265" // Fallback to software encoding
+			outputArgs["c:v"] = "libx265"
 		}
 	case "h264":
 		switch runtime.GOOS {
@@ -204,7 +223,7 @@ func (r *Renderer) getArgs(options *ShaderOptions, ffmpegOutPixFmt string) (inpu
 		case "darwin":
 			outputArgs["c:v"] = "h264_videotoolbox"
 		default:
-			outputArgs["c:v"] = "libx264" // Fallback to software encoding
+			outputArgs["c:v"] = "libx264"
 		}
 	}
 
@@ -212,11 +231,8 @@ func (r *Renderer) getArgs(options *ShaderOptions, ffmpegOutPixFmt string) (inpu
 	outputArgs["pix_fmt"] = ffmpegOutPixFmt
 
 	// if we are recording to mp4 or mov with HEVC, we need to set the tag to hvc1 for quicktime compatibility
-	if *options.Codec == "hevc" && *options.Mode == "record" {
-		path := *options.OutputFile
-		if path[len(path)-4:] == ".mp4" || path[len(path)-4:] == ".mov" {
-			outputArgs["tag:v"] = "hvc1"
-		}
+	if *options.Codec == "hevc" && (*options.OutputFile)[len(*options.OutputFile)-4:] == ".mp4" {
+		outputArgs["tag:v"] = "hvc1"
 	}
 
 	// for stream mode, we always set the output format to mpegts
@@ -236,17 +252,16 @@ func (r *Renderer) getArgs(options *ShaderOptions, ffmpegOutPixFmt string) (inpu
 	// 	outputArgs["color_trc"] = "smpte2084" // PQ (HDR10)
 	// 	outputArgs["colorspace"] = "bt2020nc"
 	//
-
 	return
 }
 
 func (r *Renderer) runEncoder(options *ShaderOptions, frameChan <-chan *Frame, doneChan chan<- error) {
 	shmNameStr := "/goshadertoy"
-	bytesPerPixel := 4
+	bytesPerPixel := 1
 	if r.offscreenRenderer.bitDepth > 8 {
-		bytesPerPixel = 8
+		bytesPerPixel = 2
 	}
-	shmSize := *options.Width * *options.Height * bytesPerPixel
+	shmSize := *options.Width * *options.Height * bytesPerPixel * 3
 
 	shm, err := sharedmemory.CreateSharedMemory(shmNameStr, shmSize)
 	if err != nil {
@@ -263,7 +278,7 @@ func (r *Renderer) runEncoder(options *ShaderOptions, frameChan <-chan *Frame, d
 	}
 	shmFilePtr[len(shmNameStr)+1] = 0
 
-	_, _, ffmpegInPixFmt, ffmpegOutPixFmt := getFormatForBitDepth(r.offscreenRenderer.bitDepth)
+	_, _, _, ffmpegInPixFmt, ffmpegOutPixFmt := getFormatForBitDepth(r.offscreenRenderer.bitDepth)
 	header.width = C.uint32_t(*options.Width)
 	header.height = C.uint32_t(*options.Height)
 	header.frame_rate = C.uint32_t(*options.FPS)
@@ -353,15 +368,16 @@ func (r *Renderer) RunOffscreen(options *ShaderOptions) error {
 
 func (r *Renderer) runStreamMode(options *ShaderOptions) error {
 	log.Println("Starting in stream mode...")
-	frameChan := make(chan *Frame, len(r.offscreenRenderer.pbos))
+	frameChan := make(chan *Frame, len(r.offscreenRenderer.pbos)/3)
 	encoderDoneChan := make(chan error, 1)
 
 	go r.runEncoder(options, frameChan, encoderDoneChan)
 
 	if *options.Prewarm {
 		log.Println("Pre-warming renderer...")
-		for i := 0; i < len(r.offscreenRenderer.pbos)*2; i++ {
+		for i := 0; i < len(r.offscreenRenderer.pbos); i++ {
 			r.RenderFrame(0, int32(i), [4]float32{0, 0, 0, 0}, &inputs.Uniforms{})
+			r.RenderToYUV()
 		}
 		log.Println("Pre-warming complete.")
 	}
@@ -390,17 +406,10 @@ func (r *Renderer) runStreamMode(options *ShaderOptions) error {
 			}
 
 			r.RenderFrame(simTime, int32(frameCounter), [4]float32{0, 0, 0, 0}, uniforms)
+			r.RenderToYUV()
 
-			gl.BindFramebuffer(gl.FRAMEBUFFER, r.offscreenRenderer.blitFbo)
-			gl.Clear(gl.COLOR_BUFFER_BIT)
-			gl.UseProgram(r.blitProgram)
-			gl.ActiveTexture(gl.TEXTURE0)
-			gl.BindTexture(gl.TEXTURE_2D, r.offscreenRenderer.textureID)
-			gl.BindVertexArray(r.quadVAO)
-			gl.DrawArrays(gl.TRIANGLES, 0, 6)
-
-			gl.BindFramebuffer(gl.READ_FRAMEBUFFER, r.offscreenRenderer.blitFbo)
-			pixels, err := r.offscreenRenderer.readPixelsAsync(*options.Width, *options.Height)
+			gl.BindFramebuffer(gl.READ_FRAMEBUFFER, r.offscreenRenderer.yuvFbo)
+			pixels, err := r.offscreenRenderer.readYUVPixelsAsync(*options.Width, *options.Height)
 			gl.BindFramebuffer(gl.READ_FRAMEBUFFER, 0)
 
 			if err != nil {
@@ -419,11 +428,11 @@ func (r *Renderer) runRecordMode(options *ShaderOptions) error {
 	log.Println("Starting in record mode...")
 	totalFrames := int(*options.Duration * float64(*options.FPS))
 	shmNameStr := "/goshadertoy"
-	bytesPerPixel := 4
+	bytesPerPixel := 1
 	if r.offscreenRenderer.bitDepth > 8 {
-		bytesPerPixel = 8
+		bytesPerPixel = 2
 	}
-	shmSize := *options.Width * *options.Height * bytesPerPixel
+	shmSize := *options.Width * *options.Height * bytesPerPixel * 3
 
 	shm, err := sharedmemory.CreateSharedMemory(shmNameStr, shmSize)
 	if err != nil {
@@ -431,29 +440,21 @@ func (r *Renderer) runRecordMode(options *ShaderOptions) error {
 	}
 	defer shm.Close()
 
-	// Prepare the main SHMHeader
 	header := C.SHMHeader{}
-
-	// Get a pointer to the shm_file field
 	shmFilePtr := (*[512]C.char)(unsafe.Pointer(&header.shm_file))
-
-	// the shm_file needs to start with '/'
 	shmFilePtr[0] = '/'
-
-	// Copy bytes from the Go string to the C char array
-	for i := 0; i < len(shmNameStr) && i < 511; i++ { // reserve 1 byte for null-terminator
+	for i := 0; i < len(shmNameStr) && i < 511; i++ {
 		shmFilePtr[i+1] = C.char(shmNameStr[i])
 	}
-	shmFilePtr[len(shmNameStr)+1] = 0 // null-terminate
+	shmFilePtr[len(shmNameStr)+1] = 0
 
-	_, _, ffmpegInPixFmt, ffmpegOutPixFmt := getFormatForBitDepth(r.offscreenRenderer.bitDepth)
+	_, _, _, ffmpegInPixFmt, ffmpegOutPixFmt := getFormatForBitDepth(r.offscreenRenderer.bitDepth)
 	header.width = C.uint32_t(*options.Width)
 	header.height = C.uint32_t(*options.Height)
 	header.frame_rate = C.uint32_t(*options.FPS)
 	header.pix_fmt = C.int32_t(ffmpegInPixFmt)
 	headerBytes := (*[unsafe.Sizeof(header)]byte)(unsafe.Pointer(&header))[:]
 
-	// setup FFmpeg with a pipe for control data
 	pipeReader, pipeWriter := io.Pipe()
 	inputArgs, outputArgs := r.getArgs(options, ffmpegOutPixFmt)
 
@@ -486,21 +487,10 @@ func (r *Renderer) runRecordMode(options *ShaderOptions) error {
 
 		// Render the frame and get the pixel data
 		r.RenderFrame(currentTime, int32(i), [4]float32{0, 0, 0, 0}, uniforms)
+		r.RenderToYUV()
 
-		// Perform the vertical flip by blitting from the main FBO to the blit FBO
-		gl.BindFramebuffer(gl.FRAMEBUFFER, r.offscreenRenderer.blitFbo)
-		gl.Clear(gl.COLOR_BUFFER_BIT)
-		gl.UseProgram(r.blitProgram)
-		gl.ActiveTexture(gl.TEXTURE0)
-
-		// Use the output of the main render as the texture for the blit
-		gl.BindTexture(gl.TEXTURE_2D, r.offscreenRenderer.textureID)
-		gl.BindVertexArray(r.quadVAO)
-		gl.DrawArrays(gl.TRIANGLES, 0, 6)
-
-		// Read the pixels from the blit FBO, which now contains the flipped image
-		gl.BindFramebuffer(gl.READ_FRAMEBUFFER, r.offscreenRenderer.blitFbo)
-		pixels, err := r.offscreenRenderer.readPixelsAsync(*options.Width, *options.Height)
+		gl.BindFramebuffer(gl.READ_FRAMEBUFFER, r.offscreenRenderer.yuvFbo)
+		pixels, err := r.offscreenRenderer.readYUVPixelsAsync(*options.Width, *options.Height)
 		gl.BindFramebuffer(gl.READ_FRAMEBUFFER, 0)
 
 		if err != nil {

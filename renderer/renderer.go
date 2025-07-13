@@ -144,11 +144,18 @@ func (r *Renderer) InitScene(shaderArgs *api.ShaderArgs) error {
 
 	blitVertexSource := shader.GenerateVertexShader(r.isGLES())
 	blitFragmentSource := shader.GetBlitFragmentShader(r.recordMode, r.isGLES())
+	yuvFragmentSource := shader.GetYUVFragmentShader(r.isGLES())
 
 	r.blitProgram, err = newProgram(blitVertexSource, blitFragmentSource)
 	if err != nil {
 		return fmt.Errorf("failed to create blit program: %w", err)
 	}
+
+	r.yuvProgram, err = newProgram(blitVertexSource, yuvFragmentSource)
+	if err != nil {
+		return fmt.Errorf("failed to create yuv program: %w", err)
+	}
+	r.yuvBitDepthLoc = gl.GetUniformLocation(r.yuvProgram, gl.Str("u_bitDepth\x00"))
 
 	width, height := r.width, r.height
 	if !r.recordMode && r.context != nil {
@@ -218,7 +225,7 @@ func (r *Renderer) RenderFrame(time float64, frameCount int32, mouseData [4]floa
 			r.offscreenRenderer.width = fbWidth
 			r.offscreenRenderer.height = fbHeight
 			gl.BindTexture(gl.TEXTURE_2D, r.offscreenRenderer.textureID)
-			gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, int32(fbWidth), int32(fbHeight), 0, gl.RGBA, gl.UNSIGNED_BYTE, nil)
+			gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, int32(fbWidth), int32(fbHeight), 0, gl.RGBA, gl.FLOAT, nil)
 
 			gl.BindRenderbuffer(gl.RENDERBUFFER, r.offscreenRenderer.depthRenderbuffer)
 			gl.RenderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, int32(fbWidth), int32(fbHeight))
@@ -262,6 +269,19 @@ func (r *Renderer) RenderFrame(time float64, frameCount int32, mouseData [4]floa
 	gl.BindVertexArray(r.quadVAO)
 	gl.DrawArrays(gl.TRIANGLES, 0, 6)
 	unbindChannels(imagePass)
+	gl.BindFramebuffer(gl.FRAMEBUFFER, 0)
+}
+
+func (r *Renderer) RenderToYUV() {
+	gl.BindFramebuffer(gl.FRAMEBUFFER, r.offscreenRenderer.yuvFbo)
+	gl.UseProgram(r.yuvProgram)
+	gl.Uniform1i(r.yuvBitDepthLoc, int32(r.offscreenRenderer.bitDepth))
+	gl.ActiveTexture(gl.TEXTURE0)
+	gl.BindTexture(gl.TEXTURE_2D, r.offscreenRenderer.textureID)
+	gl.Viewport(0, 0, int32(r.width), int32(r.height))
+	gl.Clear(gl.COLOR_BUFFER_BIT)
+	gl.BindVertexArray(r.quadVAO)
+	gl.DrawArrays(gl.TRIANGLES, 0, 6)
 	gl.BindFramebuffer(gl.FRAMEBUFFER, 0)
 }
 

@@ -6,7 +6,7 @@ import (
 	inputs "github.com/richinsley/goshadertoy/inputs"
 )
 
-// --- Desktop GL Shaders ---
+// ────────────────────────────────── Desktop GL ──────────────────────────────────
 
 const vertexShaderSourceGL = `#version 410 core
 layout (location = 0) in vec2 in_vert;
@@ -17,27 +17,68 @@ void main() {
 }
 `
 
+// YUV conversion with γ-correction + unbiased rounding
+const yuvFragmentShaderSourceGL = `#version 410 core
+in  vec2 frag_uv;
+layout(location = 0) out uint y_out;
+layout(location = 1) out uint u_out;
+layout(location = 2) out uint v_out;
+
+uniform sampler2D u_texture;   // linear RGB input
+uniform int       u_bitDepth;  // 8 or 10
+
+// BT.709 (R'G'B' -> Y'Cb'Cr')
+const mat3 RGB_TO_YUV = mat3(
+     0.2126 ,  0.7152 ,  0.0722 ,
+    -0.1146 , -0.3854 ,  0.5000 ,
+     0.5000 , -0.4542 , -0.0458
+);
+
+// Linear -> sRGB (BT.709) transfer
+vec3 linearToSRGB(vec3 l)
+{
+    bvec3 cutoff = lessThanEqual(l, vec3(0.0031308));
+    vec3  low    = l * 12.92;
+    vec3  high   = 1.055 * pow(l, vec3(1.0 / 2.4)) - 0.055;
+    return mix(high, low, cutoff);
+}
+
+void main()
+{
+    // 1) sample linear RGB and convert to R'G'B'
+    vec3 rgb_p = linearToSRGB(texture(u_texture, frag_uv).rgb);
+
+    // 2) R'G'B' -> Y'Cb'Cr' (Y in [0..1], C in [-0.5..+0.5])
+    vec3 yuv = RGB_TO_YUV * rgb_p;
+
+    // 3) quantise to TV-range with unbiased rounding
+    if (u_bitDepth > 8) {
+        y_out = uint(round(clamp(yuv.x * 876.0 +  64.0,  64.0, 940.0))); // 10-bit
+        u_out = uint(round(clamp(yuv.y * 896.0 + 512.0,  64.0, 960.0)));
+        v_out = uint(round(clamp(yuv.z * 896.0 + 512.0,  64.0, 960.0)));
+    } else {
+        y_out = uint(round(clamp(yuv.x * 219.0 +  16.0,  16.0, 235.0))); // 8-bit
+        u_out = uint(round(clamp(yuv.y * 224.0 + 128.0,  16.0, 240.0)));
+        v_out = uint(round(clamp(yuv.z * 224.0 + 128.0,  16.0, 240.0)));
+    }
+}
+`
+
 const blitFragmentShaderSourceFlipGL = `#version 410 core
 in vec2 frag_uv;
 out vec4 fragColor;
 uniform sampler2D u_texture;
-
-void main() {
-    fragColor = texture(u_texture, vec2(frag_uv.x, 1.0 - frag_uv.y));
-}
+void main() { fragColor = texture(u_texture, vec2(frag_uv.x, 1.0 - frag_uv.y)); }
 `
 
 const blitFragmentShaderSourceGL = `#version 410 core
 in vec2 frag_uv;
 out vec4 fragColor;
 uniform sampler2D u_texture;
-
-void main() {
-    fragColor = texture(u_texture, frag_uv);
-}
+void main() { fragColor = texture(u_texture, frag_uv); }
 `
 
-// --- GLES Shaders ---
+// ──────────────────────────────────── GLES ──────────────────────────────────────
 
 const vertexShaderSourceGLES = `#version 300 es
 layout (location = 0) in vec2 in_vert;
@@ -48,15 +89,54 @@ void main() {
 }
 `
 
+// GLES version
+const yuvFragmentShaderSourceGLES = `#version 300 es
+precision highp float;
+precision highp int;
+
+in  vec2 frag_uv;
+layout(location = 0) out uint y_out;
+layout(location = 1) out uint u_out;
+layout(location = 2) out uint v_out;
+
+uniform sampler2D u_texture;
+uniform int       u_bitDepth;
+
+const mat3 RGB_TO_YUV = mat3(
+     0.2126 ,  0.7152 ,  0.0722 ,
+    -0.1146 , -0.3854 ,  0.5000 ,
+     0.5000 , -0.4542 , -0.0458
+);
+
+// Linear -> sRGB transfer
+vec3 linearToSRGB(vec3 l) {
+    vec3 low  = 12.92 * l;
+    vec3 high = 1.055 * pow(l, vec3(1.0 / 2.4)) - 0.055;
+    return mix(high, low, step(l, vec3(0.0031308)));
+}
+
+void main() {
+    vec3 rgb_p = linearToSRGB(texture(u_texture, frag_uv).rgb);
+    vec3 yuv   = RGB_TO_YUV * rgb_p;
+
+    if (u_bitDepth > 8) {
+        y_out = uint(round(clamp(yuv.x * 876.0 +  64.0,  64.0, 940.0)));
+        u_out = uint(round(clamp(yuv.y * 896.0 + 512.0,  64.0, 960.0)));
+        v_out = uint(round(clamp(yuv.z * 896.0 + 512.0,  64.0, 960.0)));
+    } else {
+        y_out = uint(round(clamp(yuv.x * 219.0 +  16.0,  16.0, 235.0)));
+        u_out = uint(round(clamp(yuv.y * 224.0 + 128.0,  16.0, 240.0)));
+        v_out = uint(round(clamp(yuv.z * 224.0 + 128.0,  16.0, 240.0)));
+    }
+}
+`
+
 const blitFragmentShaderSourceFlipGLES = `#version 300 es
 precision mediump float;
 in vec2 frag_uv;
 out vec4 fragColor;
 uniform sampler2D u_texture;
-
-void main() {
-    fragColor = texture(u_texture, vec2(frag_uv.x, 1.0 - frag_uv.y));
-}
+void main() { fragColor = texture(u_texture, vec2(frag_uv.x, 1.0 - frag_uv.y)); }
 `
 
 const blitFragmentShaderSourceGLES = `#version 300 es
@@ -64,13 +144,10 @@ precision mediump float;
 in vec2 frag_uv;
 out vec4 fragColor;
 uniform sampler2D u_texture;
-
-void main() {
-    fragColor = texture(u_texture, frag_uv);
-}
+void main() { fragColor = texture(u_texture, frag_uv); }
 `
 
-// --- Public Functions ---
+// ────────────────────────────────── Public API ─────────────────────────────────
 
 func GenerateVertexShader(isGLES bool) string {
 	if isGLES {
@@ -79,7 +156,14 @@ func GenerateVertexShader(isGLES bool) string {
 	return vertexShaderSourceGL
 }
 
-func GetBlitFragmentShader(flip bool, isGLES bool) string {
+func GetYUVFragmentShader(isGLES bool) string {
+	if isGLES {
+		return yuvFragmentShaderSourceGLES
+	}
+	return yuvFragmentShaderSourceGL
+}
+
+func GetBlitFragmentShader(flip, isGLES bool) string {
 	if isGLES {
 		if flip {
 			return blitFragmentShaderSourceFlipGLES
@@ -92,63 +176,60 @@ func GetBlitFragmentShader(flip bool, isGLES bool) string {
 	return blitFragmentShaderSourceGL
 }
 
-// GeneratePreamble creates the GLSL preamble with dynamic sampler types.
+// ────────────────────── Dynamic preamble / user code glue ──────────────────────
+
 func GeneratePreamble(channels []inputs.IChannel) string {
-	basePreamble := `#version 300 es
+	base := `#version 300 es
 precision highp float;
 precision highp int;
 precision mediump sampler3D;
 
-// it's 2025, so this is always 1
 #define HW_PERFORMANCE 1
 
-uniform vec3      iResolution;           // viewport resolution (in pixels)
-uniform float     iTime;                 // shader playback time (in seconds)
-uniform float     iTimeDelta;            // render time (in seconds)
-uniform float     iFrameRate;            // shader frame rate
-uniform int       iFrame;                // shader playback frame
-uniform float     iChannelTime[4];       // channel playback time (in seconds)
-uniform vec3      iChannelResolution[4]; // channel resolution (in pixels)
-uniform vec4      iMouse;                // mouse pixel coords. xy: current (if MLB down), zw: click
-uniform vec4      iDate;                 // (year, month, day, time in seconds)
-uniform float     iSampleRate;           // sound sample rate (i.e., 44100)
+uniform vec3  iResolution;
+uniform float iTime;
+uniform float iTimeDelta;
+uniform float iFrameRate;
+uniform int   iFrame;
+uniform float iChannelTime[4];
+uniform vec3  iChannelResolution[4];
+uniform vec4  iMouse;
+uniform vec4  iDate;
+uniform float iSampleRate;
 `
-	// Dynamically declare iChannel samplers based on their type
-	channelDecls := ""
+	// declare iChannelN samplers
 	for i := 0; i < 4; i++ {
-		samplerType := "sampler2D" // Default to sampler2D
+		sampler := "sampler2D"
 		if channels[i] != nil {
-			samplerType = channels[i].GetSamplerType()
+			sampler = channels[i].GetSamplerType()
 		}
-		channelDecls += fmt.Sprintf("uniform %s iChannel%d;\n", samplerType, i)
+		base += fmt.Sprintf("uniform %s iChannel%d;\n", sampler, i)
 	}
 
-	// Other defines and helper functions here
-	postamble := `
+	// helper funcs
+	return base + `
 in vec2 frag_coord_uv;
 out vec4 fragColor;
 
-#define FAST_TANH_BODY(x)  ( (x) * (27.0 + (x)*(x)) / (27.0 + 9.0*(x)*(x)) )
+#define FAST_TANH_BODY(x) ((x) * (27.0 + (x)*(x)) / (27.0 + 9.0*(x)*(x)))
 float fast_tanh(float x) { return FAST_TANH_BODY(x); }
 vec2  fast_tanh(vec2  x) { return FAST_TANH_BODY(x); }
 vec3  fast_tanh(vec3  x) { return FAST_TANH_BODY(x); }
 vec4  fast_tanh(vec4  x) { return FAST_TANH_BODY(x); }
 #define tanh fast_tanh
 `
-	return basePreamble + channelDecls + postamble
 }
 
 func GetMain() string {
 	return `
-void main( void )
+void main(void)
 {
-    // The mainImage function expects pixel coordinates, which gl_FragCoord provides.
-    mainImage( fragColor, gl_FragCoord.xy );
+    mainImage(fragColor, gl_FragCoord.xy);
 }
 `
 }
 
-// GetFragmentShader combines the dynamic preamble, the user's shader code, and the main wrapper.
-func GetFragmentShader(channels []inputs.IChannel, commoncode, shadercode string) string {
-	return GeneratePreamble(channels) + commoncode + shadercode + GetMain()
+// Combine preamble + user common + user frag + wrapper
+func GetFragmentShader(ch []inputs.IChannel, common, user string) string {
+	return GeneratePreamble(ch) + common + user + GetMain()
 }
