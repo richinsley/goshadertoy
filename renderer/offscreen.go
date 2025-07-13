@@ -227,7 +227,7 @@ func (r *Renderer) getArgs(options *ShaderOptions, ffmpegOutPixFmt string) (inpu
 		log.Println("Using macOS (VideoToolbox) hardware acceleration.")
 		// The scale_vt filter handles the format conversion on the GPU before sending to the encoder.
 		// Note: The 'hwupload' step is implicit with VideoToolbox filters.
-		outputArgs["vf"] = fmt.Sprintf("scale_vt=format=%s", ffmpegOutPixFmt)
+		// outputArgs["vf"] = fmt.Sprintf("scale_vt=format=%s", ffmpegOutPixFmt)
 		if *options.Codec == "hevc" {
 			outputArgs["c:v"] = "hevc_videotoolbox"
 		} else {
