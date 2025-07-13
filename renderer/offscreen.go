@@ -54,9 +54,9 @@ func getFormatForBitDepth(bitDepth int) (glInternalFormat int32, glpixelFormat u
 	case 10, 12:
 		// For 10/12-bit, we render to a 16-bit unsigned integer texture and read back as 16-bit unsigned shorts.
 		// using full 444 for encoding breaks several decoders, so we'll use 422 instead for now.
-		return gl.R16UI, gl.RED_INTEGER, gl.UNSIGNED_SHORT, 68, "p010le" //"yuv444p10le"
+		return gl.R16UI, gl.RED_INTEGER, gl.UNSIGNED_SHORT, 68, "p010le" //"yuv444p10le" "p010le"
 	default: // 8-bit
-		return gl.R8, gl.RED, gl.UNSIGNED_BYTE, 5, "nv12" //"yuv444p"
+		return gl.R8UI, gl.RED_INTEGER, gl.UNSIGNED_BYTE, 5, "nv12" //"yuv444p"
 	}
 }
 func NewOffscreenRenderer(width, height, bitDepth, numPBOs int) (*OffscreenRenderer, error) {
@@ -198,60 +198,70 @@ func (or *OffscreenRenderer) readYUVPixelsAsync(width, height int) ([]byte, erro
 }
 
 func (r *Renderer) getArgs(options *ShaderOptions, ffmpegOutPixFmt string) (inputArgs ffmpeg.KwArgs, outputArgs ffmpeg.KwArgs) {
-	inputArgs = ffmpeg.KwArgs{"f": "shm_demuxer"}
-	if *options.BitDepth > 8 {
-		inputArgs["color_primaries"] = "bt2020"
-		inputArgs["color_trc"] = "smpte2084" // PQ
-		inputArgs["colorspace"] = "bt2020nc"
+	// Describe the incoming raw YUV 4:4:4 stream from the shader. This is common for all platforms.
+	inputArgs = ffmpeg.KwArgs{
+		"f":               "shm_demuxer",
+		"color_range":     "tv",
+		"colorspace":      "bt709",
+		"color_primaries": "bt709",
+		"color_trc":       "bt709",
 	}
 
 	outputArgs = ffmpeg.KwArgs{}
-	switch *options.Codec {
-	case "hevc":
-		switch runtime.GOOS {
-		case "windows", "linux":
+
+	// Platform-specific hardware acceleration logic
+	switch runtime.GOOS {
+	case "linux":
+		log.Println("Using Linux (NVENC) hardware acceleration.")
+		// The filter chain uploads the frame to the GPU, converts the pixel format, and passes it to the NVENC encoder.
+		outputArgs["vf"] = fmt.Sprintf("hwupload_cuda,scale_cuda=format=%s", ffmpegOutPixFmt)
+		if *options.Codec == "hevc" {
 			outputArgs["c:v"] = "hevc_nvenc"
-		case "darwin":
-			outputArgs["c:v"] = "hevc_videotoolbox"
-		default:
-			outputArgs["c:v"] = "libx265"
-		}
-	case "h264":
-		switch runtime.GOOS {
-		case "windows", "linux":
+			outputArgs["preset"] = "p2" // p2, second fastest preset
+		} else {
 			outputArgs["c:v"] = "h264_nvenc"
-		case "darwin":
+			outputArgs["preset"] = "p2"
+		}
+
+	case "darwin":
+		log.Println("Using macOS (VideoToolbox) hardware acceleration.")
+		// The scale_vt filter handles the format conversion on the GPU before sending to the encoder.
+		// Note: The 'hwupload' step is implicit with VideoToolbox filters.
+		outputArgs["vf"] = fmt.Sprintf("scale_vt=format=%s", ffmpegOutPixFmt)
+		if *options.Codec == "hevc" {
+			outputArgs["c:v"] = "hevc_videotoolbox"
+		} else {
 			outputArgs["c:v"] = "h264_videotoolbox"
-		default:
+		}
+
+	default:
+		log.Println("Using software encoding pipeline (no hardware acceleration).")
+		// Fallback for other systems (e.g., Windows without NVENC setup)
+		if *options.Codec == "hevc" {
+			outputArgs["c:v"] = "libx265"
+		} else {
 			outputArgs["c:v"] = "libx264"
 		}
 	}
 
-	outputArgs["b:v"] = "25M"
-	outputArgs["pix_fmt"] = ffmpegOutPixFmt
+	// Common output arguments
+	if *options.BitDepth > 8 {
+		outputArgs["color_primaries"] = "bt2020"
+		outputArgs["color_trc"] = "smpte2084" // PQ
+		outputArgs["colorspace"] = "bt2020nc"
+	}
 
-	// if we are recording to mp4 or mov with HEVC, we need to set the tag to hvc1 for quicktime compatibility
+	outputArgs["b:v"] = "25M"
+	// outputArgs["pix_fmt"] = ffmpegOutPixFmt
+
 	if *options.Codec == "hevc" && (*options.OutputFile)[len(*options.OutputFile)-4:] == ".mp4" {
 		outputArgs["tag:v"] = "hvc1"
 	}
 
-	// for stream mode, we always set the output format to mpegts
 	if *options.Mode == "stream" {
 		outputArgs["f"] = "mpegts"
 	}
 
-	// // When HDR enabled and in high bit depth mode, tag both the input and output streams correctly.
-	// if r.offscreenRenderer.bitDepth > 8 {
-	// 	// Tag the INPUT stream as linear light
-	// 	inputArgs["color_primaries"] = "bt2020"
-	// 	inputArgs["color_trc"] = "linear"
-	// 	// inputArgs["colorspace"] = "bt2020"
-
-	// 	// Tag the OUTPUT stream for HDR display
-	// 	outputArgs["color_primaries"] = "bt2020"
-	// 	outputArgs["color_trc"] = "smpte2084" // PQ (HDR10)
-	// 	outputArgs["colorspace"] = "bt2020nc"
-	//
 	return
 }
 

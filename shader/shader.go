@@ -28,10 +28,11 @@ uniform sampler2D u_texture;   // linear RGB input
 uniform int       u_bitDepth;  // 8 or 10
 
 // BT.709 (R'G'B' -> Y'Cb'Cr')
+// This matrix is constructed with column vectors to match GLSL's column-major memory layout.
 const mat3 RGB_TO_YUV = mat3(
-     0.2126 ,  0.7152 ,  0.0722 ,
-    -0.1146 , -0.3854 ,  0.5000 ,
-     0.5000 , -0.4542 , -0.0458
+    vec3( 0.2126, -0.1146,  0.5000), // Column 0
+    vec3( 0.7152, -0.3854, -0.4542), // Column 1
+    vec3( 0.0722,  0.5000, -0.0458)  // Column 2
 );
 
 // Linear -> sRGB (BT.709) transfer
@@ -45,8 +46,20 @@ vec3 linearToSRGB(vec3 l)
 
 void main()
 {
-    // 1) sample linear RGB and convert to R'G'B'
-    vec3 rgb_p = linearToSRGB(texture(u_texture, frag_uv).rgb);
+    // flip the v coordinate
+    vec2 nfrag_uv = vec2(frag_uv.x, 1.0 - frag_uv.y);
+    vec3 rgb_in = texture(u_texture, nfrag_uv).rgb;
+    vec3 rgb_p; // This will hold the sRGB / gamma-corrected value
+
+    if (u_bitDepth > 8) {
+        // For high bit depth, the input texture is linear (e.g., RGBA16F),
+        // so we must convert it to sRGB before the YUV matrix.
+        rgb_p = linearToSRGB(rgb_in);
+    } else {
+        // For 8-bit, the input texture is already sRGB (RGBA8),
+        // so we use its value directly.
+        rgb_p = rgb_in;
+    }
 
     // 2) R'G'B' -> Y'Cb'Cr' (Y in [0..1], C in [-0.5..+0.5])
     vec3 yuv = RGB_TO_YUV * rgb_p;
@@ -102,10 +115,12 @@ layout(location = 2) out uint v_out;
 uniform sampler2D u_texture;
 uniform int       u_bitDepth;
 
+// BT.709 (R'G'B' -> Y'Cb'Cr')
+// This matrix is constructed with column vectors to match GLSL's column-major memory layout.
 const mat3 RGB_TO_YUV = mat3(
-     0.2126 ,  0.7152 ,  0.0722 ,
-    -0.1146 , -0.3854 ,  0.5000 ,
-     0.5000 , -0.4542 , -0.0458
+    vec3( 0.2126, -0.1146,  0.5000), // Column 0
+    vec3( 0.7152, -0.3854, -0.4542), // Column 1
+    vec3( 0.0722,  0.5000, -0.0458)  // Column 2
 );
 
 // Linear -> sRGB transfer
@@ -115,16 +130,33 @@ vec3 linearToSRGB(vec3 l) {
     return mix(high, low, step(l, vec3(0.0031308)));
 }
 
-void main() {
-    vec3 rgb_p = linearToSRGB(texture(u_texture, frag_uv).rgb);
-    vec3 yuv   = RGB_TO_YUV * rgb_p;
+void main()
+{
+    // flip the v coordinate
+    vec2 nfrag_uv = vec2(frag_uv.x, 1.0 - frag_uv.y);
+    vec3 rgb_in = texture(u_texture, nfrag_uv).rgb;
+    vec3 rgb_p; // This will hold the sRGB / gamma-corrected value
 
     if (u_bitDepth > 8) {
-        y_out = uint(round(clamp(yuv.x * 876.0 +  64.0,  64.0, 940.0)));
+        // For high bit depth, the input texture is linear (e.g., RGBA16F),
+        // so we must convert it to sRGB before the YUV matrix.
+        rgb_p = linearToSRGB(rgb_in);
+    } else {
+        // For 8-bit, the input texture is already sRGB (RGBA8),
+        // so we use its value directly.
+        rgb_p = rgb_in;
+    }
+
+    // 2) R'G'B' -> Y'Cb'Cr' (Y in [0..1], C in [-0.5..+0.5])
+    vec3 yuv = RGB_TO_YUV * rgb_p;
+
+    // 3) quantise to TV-range with unbiased rounding
+    if (u_bitDepth > 8) {
+        y_out = uint(round(clamp(yuv.x * 876.0 +  64.0,  64.0, 940.0))); // 10-bit
         u_out = uint(round(clamp(yuv.y * 896.0 + 512.0,  64.0, 960.0)));
         v_out = uint(round(clamp(yuv.z * 896.0 + 512.0,  64.0, 960.0)));
     } else {
-        y_out = uint(round(clamp(yuv.x * 219.0 +  16.0,  16.0, 235.0)));
+        y_out = uint(round(clamp(yuv.x * 219.0 +  16.0,  16.0, 235.0))); // 8-bit
         u_out = uint(round(clamp(yuv.y * 224.0 + 128.0,  16.0, 240.0)));
         v_out = uint(round(clamp(yuv.z * 224.0 + 128.0,  16.0, 240.0)));
     }
