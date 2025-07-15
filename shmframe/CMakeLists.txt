@@ -46,6 +46,7 @@ link_directories(
 
 add_library(test_arcana_plugs SHARED
     shmframe.c 
+    shm_muxer.c
     arcana_loader.c
 )
 
