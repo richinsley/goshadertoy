@@ -14,9 +14,8 @@ import (
 	ffmpeg "github.com/u2takey/ffmpeg-go"
 )
 
-/*
-#include "protocol.h"
-*/
+// #cgo CFLAGS: -I../shmframe
+// #include "protocol.h"
 import "C"
 
 // Frame represents a single rendered frame's data, ready for encoding.
