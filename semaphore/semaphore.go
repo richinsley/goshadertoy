@@ -1,4 +1,4 @@
-package jumpboot
+package semaphore
 
 type Semaphore interface {
 	Acquire() error

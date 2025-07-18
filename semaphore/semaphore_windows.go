@@ -1,7 +1,7 @@
 //go:build windows
 // +build windows
 
-package jumpboot
+package semaphore
 
 import (
 	"fmt"
