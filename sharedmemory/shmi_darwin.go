@@ -12,36 +12,36 @@ package sharedmemory
 #include <unistd.h>
 #include <sys/errno.h>
 
-int _create(const char* name, int size, int flag) {
-    // First try to remove any existing segment in that name
-    shm_unlink(name);  // It's okay if this fails
+// _create_shm is called by the "owner" process. It cleans up stale
+// segments before creating and sizing a new one.
+int _create_shm(const char* name, int size) {
+    shm_unlink(name);
 
     mode_t mode = S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP;
+    int flags = O_RDWR | O_CREAT;
 
-    int fd = shm_open(name, flag | O_CREAT, mode);
+    int fd = shm_open(name, flags, mode);
     if (fd < 0) {
         return -1;
     }
 
-    // Single ftruncate call is sufficient
     if (ftruncate(fd, size) != 0) {
-        int err = errno;  // Save errno for debugging
         close(fd);
         shm_unlink(name);
         return -2;
     }
-
     return fd;
 }
 
-int Create(const char* name, int size) {
-	int flag = O_RDWR | O_CREAT;
-	return _create(name, size, flag);
-}
-
-int Open(const char* name, int size) {
-	int flag = O_RDWR;
-	return _create(name, size, flag);
+// _open_shm is called by a client process. It only opens an existing
+// segment and MUST NOT call shm_unlink.
+int _open_shm(const char* name) {
+    int flags = O_RDWR;
+    int fd = shm_open(name, flags, 0); // Mode is ignored when not creating
+    if (fd < 0) {
+        return -1;
+    }
+    return fd;
 }
 
 void* Map(int fd, int size) {
@@ -92,41 +92,30 @@ func (o *shmi) getPtr() unsafe.Pointer {
 	return o.v
 }
 
-// create shared memory. return shmi object.
-// name should not be more than 31 bytes.
 func create(name string, size int) (*shmi, error) {
 	name = "/" + name
-
-	fd := C.Create(C.CString(name), C.int(size))
+	fd := C._create_shm(C.CString(name), C.int(size))
 	if fd < 0 {
 		return nil, fmt.Errorf("create")
 	}
-
 	v := C.Map(fd, C.int(size))
 	if v == nil {
 		C.Close(fd, nil, C.int(size))
 		C.Delete(C.CString(name))
 	}
-
 	return &shmi{name, fd, v, size, true}, nil
 }
 
-// open shared memory. return shmi object.
-// name should not be more than 31 bytes.
 func open(name string, size int) (*shmi, error) {
 	name = "/" + name
-
-	fd := C.Open(C.CString(name), C.int(size))
+	fd := C._open_shm(C.CString(name))
 	if fd < 0 {
 		return nil, fmt.Errorf("open")
 	}
-
 	v := C.Map(fd, C.int(size))
 	if v == nil {
 		C.Close(fd, nil, C.int(size))
-		C.Delete(C.CString(name))
 	}
-
 	return &shmi{name, fd, v, size, false}, nil
 }
 
@@ -141,7 +130,6 @@ func (o *shmi) close() error {
 	return nil
 }
 
-// read shared memory. return read size.
 func (o *shmi) readAt(p []byte, off int64) (n int, err error) {
 	if off >= int64(o.size) {
 		return 0, io.EOF
@@ -152,7 +140,6 @@ func (o *shmi) readAt(p []byte, off int64) (n int, err error) {
 	return copyPtr2Slice(uintptr(o.v), p, off, o.size), nil
 }
 
-// write shared memory. return write size.
 func (o *shmi) writeAt(p []byte, off int64) (n int, err error) {
 	if off >= int64(o.size) {
 		return 0, io.EOF

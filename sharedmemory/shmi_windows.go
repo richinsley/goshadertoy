@@ -21,7 +21,8 @@ func (o *shmi) getPtr() unsafe.Pointer {
 	return unsafe.Pointer(o.v)
 }
 
-// create shared memory. return shmi object.
+// create is called by the "owner" of the shared memory. It creates a new
+// file mapping object.
 func create(name string, size int) (*shmi, error) {
 	key, err := syscall.UTF16PtrFromString(name)
 	if err != nil {
@@ -41,15 +42,32 @@ func create(name string, size int) (*shmi, error) {
 		return nil, os.NewSyscallError("MapViewOfFile", err)
 	}
 
-	// create a slice from the shared memory
-	slice := unsafe.Slice((*byte)(unsafe.Pointer(v)), int(size))
-	slice[0] = 128
 	return &shmi{h, v, size}, nil
 }
 
-// open shared memory. return shmi object.
+// open is called by a "client". It opens an *existing* file mapping object
+// and must not try to create a new one.
 func open(name string, size int) (*shmi, error) {
-	return create(name, size)
+	key, err := syscall.UTF16PtrFromString(name)
+	if err != nil {
+		return nil, err
+	}
+
+	// Use CreateFileMapping with size 0 to open existing mapping
+	h, err := syscall.CreateFileMapping(
+		syscall.InvalidHandle, nil,
+		syscall.PAGE_READWRITE, 0, 0, key) // size 0 opens existing
+	if err != nil {
+		return nil, os.NewSyscallError("CreateFileMapping", err)
+	}
+
+	v, err := syscall.MapViewOfFile(h, syscall.FILE_MAP_WRITE, 0, 0, 0)
+	if err != nil {
+		syscall.CloseHandle(h)
+		return nil, os.NewSyscallError("MapViewOfFile", err)
+	}
+
+	return &shmi{h, v, size}, nil
 }
 
 func (o *shmi) close() error {

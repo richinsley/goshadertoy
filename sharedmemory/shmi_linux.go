@@ -7,18 +7,20 @@ package sharedmemory
 #cgo LDFLAGS: -lrt
 
 #include <sys/mman.h>
-#include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <unistd.h>
 
-int _create(const char* name, int size, int flag) {
-    shm_unlink(name);  // Clean up any stale segment
+// _create_shm is called by the "owner" process. It cleans up stale
+// segments before creating and sizing a new one.
+int _create_shm(const char* name, int size) {
+    shm_unlink(name);
 
     mode_t mode = S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP;
+    int flags = O_RDWR | O_CREAT;
 
-    int fd = shm_open(name, flag | O_CREAT, mode);
+    int fd = shm_open(name, flags, mode);
     if (fd < 0) {
         return -1;
     }
@@ -31,14 +33,15 @@ int _create(const char* name, int size, int flag) {
     return fd;
 }
 
-int Create(const char* name, int size) {
-	int flag = O_RDWR | O_CREAT;
-	return _create(name, size, flag);
-}
-
-int Open(const char* name, int size) {
-	int flag = O_RDWR;
-	return _create(name, size, flag);
+// _open_shm is called by a client process. It only opens an existing
+// segment and MUST NOT call shm_unlink.
+int _open_shm(const char* name) {
+    int flags = O_RDWR;
+    int fd = shm_open(name, flags, 0); // Mode is ignored when not creating
+    if (fd < 0) {
+        return -1;
+    }
+    return fd;
 }
 
 void* Map(int fd, int size) {
@@ -93,7 +96,7 @@ func (o *shmi) getPtr() unsafe.Pointer {
 func create(name string, size int) (*shmi, error) {
 	name = "/" + name
 
-	fd := C.Create(C.CString(name), C.int(size))
+	fd := C._create_shm(C.CString(name), C.int(size))
 	if fd < 0 {
 		return nil, fmt.Errorf("create")
 	}
@@ -111,7 +114,8 @@ func create(name string, size int) (*shmi, error) {
 func open(name string, size int) (*shmi, error) {
 	name = "/" + name
 
-	fd := C.Open(C.CString(name), C.int(size))
+	// Use the safe open function
+	fd := C._open_shm(C.CString(name))
 	if fd < 0 {
 		return nil, fmt.Errorf("open")
 	}
@@ -119,7 +123,7 @@ func open(name string, size int) (*shmi, error) {
 	v := C.Map(fd, C.int(size))
 	if v == nil {
 		C.Close(fd, nil, C.int(size))
-		C.Delete(C.CString(name))
+		// The opener should NOT delete the memory on a map failure.
 	}
 
 	return &shmi{name, fd, v, size, false}, nil
