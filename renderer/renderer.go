@@ -10,6 +10,7 @@ import (
 	gl "github.com/go-gl/gl/v4.1-core/gl"
 	api "github.com/richinsley/goshadertoy/api"
 	inputs "github.com/richinsley/goshadertoy/inputs"
+	options "github.com/richinsley/goshadertoy/options"
 	shader "github.com/richinsley/goshadertoy/shader"
 	gst "github.com/richinsley/goshadertranslator"
 )
@@ -41,7 +42,7 @@ func (r *Renderer) isGLES() bool {
 	return r.context == nil
 }
 
-func (r *Renderer) GetRenderPass(name string, shaderArgs *api.ShaderArgs) (*RenderPass, error) {
+func (r *Renderer) GetRenderPass(name string, shaderArgs *api.ShaderArgs, options *options.ShaderOptions) (*RenderPass, error) {
 	if name == "" {
 		name = "image"
 	}
@@ -57,7 +58,7 @@ func (r *Renderer) GetRenderPass(name string, shaderArgs *api.ShaderArgs) (*Rend
 		width, height = r.context.GetFramebufferSize()
 	}
 
-	channels, err := inputs.GetChannels(passArgs.Inputs, width, height, r.quadVAO, r.buffers)
+	channels, err := inputs.GetChannels(passArgs.Inputs, width, height, r.quadVAO, r.buffers, options)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create channels: %w", err)
 	}
@@ -122,7 +123,7 @@ func (r *Renderer) GetRenderPass(name string, shaderArgs *api.ShaderArgs) (*Rend
 	return retv, nil
 }
 
-func (r *Renderer) InitScene(shaderArgs *api.ShaderArgs) error {
+func (r *Renderer) InitScene(shaderArgs *api.ShaderArgs, options *options.ShaderOptions) error {
 	var err error
 	if translator == nil {
 		ctx := context.Background()
@@ -174,7 +175,7 @@ func (r *Renderer) InitScene(shaderArgs *api.ShaderArgs) error {
 
 	passnames := []string{"A", "B", "C", "D", "image"}
 	for _, name := range passnames {
-		pass, err := r.GetRenderPass(name, shaderArgs)
+		pass, err := r.GetRenderPass(name, shaderArgs, options)
 		if err != nil {
 			if strings.HasPrefix(err.Error(), "no render pass found with name") {
 				continue

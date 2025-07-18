@@ -1,4 +1,4 @@
-package renderer
+package options
 
 type ShaderOptions struct {
 	APIKey         *string
@@ -15,5 +15,6 @@ type ShaderOptions struct {
 	DecklinkDevice *string
 	Codec          *string
 	NumPBOs        *int
-	Prewarm        *bool // Optional prewarm flag to initialize the renderer before recording/streaming
+	Prewarm        *bool   // Optional prewarm flag to initialize the renderer before recording/streaming
+	AudioInput     *string // FFmpeg audio input string (e.g., a file path or 'avfoundation:default'). Overrides default mic.
 }

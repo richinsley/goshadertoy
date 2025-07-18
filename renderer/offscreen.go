@@ -10,6 +10,7 @@ import (
 
 	gl "github.com/go-gl/gl/v4.1-core/gl"
 	inputs "github.com/richinsley/goshadertoy/inputs"
+	options "github.com/richinsley/goshadertoy/options"
 	sharedmemory "github.com/richinsley/goshadertoy/sharedmemory"
 	ffmpeg "github.com/u2takey/ffmpeg-go"
 )
@@ -196,7 +197,7 @@ func (or *OffscreenRenderer) readYUVPixelsAsync(width, height int) ([]byte, erro
 	return yuvData, nil
 }
 
-func (r *Renderer) getArgs(options *ShaderOptions, ffmpegOutPixFmt string) (inputArgs ffmpeg.KwArgs, outputArgs ffmpeg.KwArgs) {
+func (r *Renderer) getArgs(options *options.ShaderOptions, ffmpegOutPixFmt string) (inputArgs ffmpeg.KwArgs, outputArgs ffmpeg.KwArgs) {
 	// Describe the incoming raw YUV 4:4:4 stream from the shader. This is common for all platforms.
 	inputArgs = ffmpeg.KwArgs{
 		"f":               "shm_demuxer",
@@ -264,7 +265,7 @@ func (r *Renderer) getArgs(options *ShaderOptions, ffmpegOutPixFmt string) (inpu
 	return
 }
 
-func (r *Renderer) runEncoder(options *ShaderOptions, frameChan <-chan *Frame, doneChan chan<- error) {
+func (r *Renderer) runEncoder(options *options.ShaderOptions, frameChan <-chan *Frame, doneChan chan<- error) {
 	shmNameStr := "/goshadertoy"
 	bytesPerPixel := 1
 	if r.offscreenRenderer.bitDepth > 8 {
@@ -368,14 +369,14 @@ endLoop:
 	doneChan <- <-errc
 }
 
-func (r *Renderer) RunOffscreen(options *ShaderOptions) error {
+func (r *Renderer) RunOffscreen(options *options.ShaderOptions) error {
 	if *options.Mode == "stream" {
 		return r.runStreamMode(options)
 	}
 	return r.runRecordMode(options)
 }
 
-func (r *Renderer) runStreamMode(options *ShaderOptions) error {
+func (r *Renderer) runStreamMode(options *options.ShaderOptions) error {
 	log.Println("Starting in stream mode...")
 	frameChan := make(chan *Frame, len(r.offscreenRenderer.pbos)/3)
 	encoderDoneChan := make(chan error, 1)
@@ -433,7 +434,7 @@ func (r *Renderer) runStreamMode(options *ShaderOptions) error {
 	}
 }
 
-func (r *Renderer) runRecordMode(options *ShaderOptions) error {
+func (r *Renderer) runRecordMode(options *options.ShaderOptions) error {
 	log.Println("Starting in record mode...")
 	totalFrames := int(*options.Duration * float64(*options.FPS))
 	shmNameStr := "/goshadertoy"

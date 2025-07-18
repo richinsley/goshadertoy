@@ -33,17 +33,24 @@ type MicChannel struct {
 	textureData []float32
 }
 
-// NewMicChannel creates a channel that gets data from a microphone.
+// NewMicChannel creates a channel that gets data from the default microphone using portaudio.
 func NewMicChannel() (*MicChannel, error) {
 	mic, err := audio.NewMicrophone(44100)
 	if err != nil {
 		log.Printf("Could not initialize microphone: %v. Using silent fallback.", err)
 		return NewMicChannelWithDevice(audio.NewNullDevice(44100))
 	}
+	log.Println("Initialized MicChannel with default PortAudio microphone.")
 	return NewMicChannelWithDevice(mic)
 }
 
-// NewMicChannelWithDevice is the core constructor.
+// NewMicChannelWithFFmpeg creates a channel that gets data from an FFmpeg process.
+func NewMicChannelWithFFmpeg(inputFile, ffmpegPath string) (*MicChannel, error) {
+	device := audio.NewFFmpegAudioDevice(inputFile, ffmpegPath)
+	log.Printf("Initialized MicChannel with FFmpeg input: %s", inputFile)
+	return NewMicChannelWithDevice(device)
+}
+
 func NewMicChannelWithDevice(device audio.AudioDevice) (*MicChannel, error) {
 	var textureID uint32
 	gl.GenTextures(1, &textureID)
@@ -63,7 +70,6 @@ func NewMicChannelWithDevice(device audio.AudioDevice) (*MicChannel, error) {
 		textureData:   make([]float32, textureWidth*textureHeight*2),
 	}
 
-	// Start the audio device and our listener goroutine.
 	audioChan, err := mc.audioDevice.Start()
 	if err != nil {
 		return nil, fmt.Errorf("could not start audio device: %w", err)
@@ -71,7 +77,7 @@ func NewMicChannelWithDevice(device audio.AudioDevice) (*MicChannel, error) {
 
 	go mc.listenForAudio(audioChan)
 
-	log.Printf("Initialized MicChannel and started audio listener.")
+	log.Printf("MicChannel audio listener started.")
 	return mc, nil
 }
 

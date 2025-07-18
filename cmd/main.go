@@ -9,10 +9,11 @@ import (
 	"strings"
 
 	api "github.com/richinsley/goshadertoy/api"
+	options "github.com/richinsley/goshadertoy/options"
 	renderer "github.com/richinsley/goshadertoy/renderer"
 )
 
-func runShadertoy(shaderArgs *api.ShaderArgs, options *renderer.ShaderOptions) {
+func runShadertoy(shaderArgs *api.ShaderArgs, options *options.ShaderOptions) {
 	// Initialize renderer
 	// If recording, the window will be hidden (headless mode)
 	mode := *options.Mode
@@ -28,7 +29,7 @@ func runShadertoy(shaderArgs *api.ShaderArgs, options *renderer.ShaderOptions) {
 	defer r.Shutdown()
 
 	// Initialize the scene with shaders and channels
-	err = r.InitScene(shaderArgs)
+	err = r.InitScene(shaderArgs, options)
 	if err != nil {
 		log.Fatalf("Failed to initialize scene: %v", err)
 	}
@@ -64,7 +65,7 @@ func init() {
 
 func main() {
 	// Command-line flags
-	options := &renderer.ShaderOptions{}
+	options := &options.ShaderOptions{}
 	options.APIKey = flag.String("apikey", "", "Shadertoy API key (from SHADERTOY_KEY env var if not set)")
 	options.ShaderID = flag.String("shader", "XlSSzV", "Shadertoy shader ID")
 	options.Help = flag.Bool("help", false, "Show help message")
@@ -82,6 +83,8 @@ func main() {
 	options.DecklinkDevice = flag.String("decklink", "", "DeckLink device name for output")
 	options.NumPBOs = flag.Int("numpbos", 2, "Number of PBOs to use for streaming")
 	options.Prewarm = flag.Bool("prewarm", false, "Prewarm the renderer before recording/streaming (optional)")
+
+	options.AudioInput = flag.String("audio-input", "", "FFmpeg audio input string (e.g., a file path or 'avfoundation:default'). Overrides default mic.")
 
 	flag.Parse()
 

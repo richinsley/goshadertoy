@@ -4,9 +4,10 @@ import (
 	"log"
 
 	api "github.com/richinsley/goshadertoy/api"
+	options "github.com/richinsley/goshadertoy/options"
 )
 
-func GetChannels(shaderInputs []*api.ShadertoyChannel, width, height int, vao uint32, buffers map[string]*Buffer) ([]IChannel, error) {
+func GetChannels(shaderInputs []*api.ShadertoyChannel, width, height int, vao uint32, buffers map[string]*Buffer, options *options.ShaderOptions) ([]IChannel, error) {
 	// Create IChannel objects from shader arguments
 	channels := make([]IChannel, 4)
 	for _, chInput := range shaderInputs {
@@ -74,9 +75,18 @@ func GetChannels(shaderInputs []*api.ShadertoyChannel, width, height int, vao ui
 			channels[channelIndex] = buffer
 			log.Printf("Assigned Buffer %s to Channel %d.", chInput.BufferRef, channelIndex)
 		case "mic":
-			newChannel, err := NewMicChannel()
+			var newChannel IChannel
+			var err error
+			if options != nil && *options.AudioInput != "" {
+				// Use FFmpeg if the audio-input flag is set
+				newChannel, err = NewMicChannelWithFFmpeg(*options.AudioInput, *options.FFMPEGPath)
+			} else {
+				// Fallback to the default portaudio microphone
+				newChannel, err = NewMicChannel()
+			}
+
 			if err != nil {
-				log.Fatalf("Failed to create mic channel %d: %v", channelIndex, err)
+				log.Fatalf("Failed to create mic channel: %v", err)
 			}
 			channels[channelIndex] = newChannel
 			log.Printf("Initialized MicChannel %d.", channelIndex)
