@@ -4,9 +4,9 @@
 #include <unistd.h>
 #include <stdio.h>
 #include <errno.h>
-#include <math.h> // For M_PI or other math functions if needed for complex calculations
+#include <math.h>
 
-#include "protocol.h"
+#include "protocol.h" //
 
 #include "libavutil/avstring.h"
 #include "libavutil/imgutils.h" // For av_image_get_buffer_size and av_get_bits_per_pixel
@@ -16,16 +16,14 @@
 #include "libavformat/internal.h" // For FFOutputFormat
 #include "libavutil/intreadwrite.h"
 #include "libavcodec/avcodec.h"
-#include "libavprivate/libavformat/mux.h"
+#include "libavprivate/libavformat/mux.h" // For FFOutputFormat definition if not provided by avformat.h
 
 // Context for the SHM muxer
 typedef struct {
     uint8_t *buffer;      // Pointer to the shared memory buffer
     int buffer_size;
     int shm_fd;
-    FILE *pipe_fp;        // File pointer for the named pipe
     char shm_name[512];   // Name of the shared memory segment
-    char pipe_name[512];  // Name of the named pipe
 } SHMMuxerContext;
 
 // write_header: Called when FFmpeg starts writing the output
@@ -35,43 +33,24 @@ static int shm_write_header(AVFormatContext *s) {
     SHMHeader header = {0};
     int ret = 0;
 
-    // Retrieve shared memory and pipe names from options using av_opt_get
-    // Options are associated with the private context, which is 'c'
+    // Ensure AVIOContext is available for writing command frames
+    if (!s->pb) {
+        av_log(s, AV_LOG_ERROR, "AVIOContext (s->pb) is NULL. Cannot write command frames.\n");
+        return AVERROR(EIO);
+    }
+
+    // Retrieve shared memory name from options
     char *shm_name_val = NULL;
-    char *pipe_name_val = NULL;
-
-    // AV_OPT_SEARCH_CHILDREN is generally used when searching for options on nested private structs
-    // For options directly on the private context, AV_OPT_SEARCH_THIS is often sufficient.
-    // However, AV_OPT_SEARCH_CHILDREN is safer as it covers both.
     av_opt_get(c, "shm_name", AV_OPT_SEARCH_CHILDREN, (uint8_t **)&shm_name_val);
-    av_opt_get(c, "pipe_name", AV_OPT_SEARCH_CHILDREN, (uint8_t **)&pipe_name_val);
 
-    if (!shm_name_val || !pipe_name_val) {
-        av_log(s, AV_LOG_ERROR, "Missing 'shm_name' or 'pipe_name' options for shm_muxer.\n");
+    if (!shm_name_val) {
+        av_log(s, AV_LOG_ERROR, "Missing 'shm_name' option for shm_muxer.\n");
         ret = AVERROR(EINVAL);
         goto fail;
     }
 
     av_strlcpy(c->shm_name, shm_name_val, sizeof(c->shm_name));
-    av_strlcpy(c->pipe_name, pipe_name_val, sizeof(c->pipe_name));
-
     av_free(shm_name_val); // Free the allocated string by av_opt_get
-    av_free(pipe_name_val); // Free the allocated string by av_opt_get
-
-    // 1. Create/Open the named pipe (FIFO)
-    if (mkfifo(c->pipe_name, 0666) == -1 && errno != EEXIST) {
-        av_log(s, AV_LOG_ERROR, "Failed to create named pipe '%s': %s\n", c->pipe_name, strerror(errno));
-        ret = AVERROR(errno);
-        goto fail;
-    }
-
-    c->pipe_fp = fopen(c->pipe_name, "wb"); // Open for writing in binary mode
-    if (!c->pipe_fp) {
-        av_log(s, AV_LOG_ERROR, "Failed to open named pipe '%s' for writing: %s\n", c->pipe_name, strerror(errno));
-        ret = AVERROR(errno);
-        goto fail;
-    }
-    av_log(s, AV_LOG_INFO, "Opened named pipe '%s' for writing.\n", c->pipe_name);
 
 
     if (s->nb_streams == 0) {
@@ -106,6 +85,7 @@ static int shm_write_header(AVFormatContext *s) {
             case AV_SAMPLE_FMT_U8P:
                 header.bit_depth = 8;
                 break;
+            // Add more formats as needed
             default:
                 av_log(s, AV_LOG_ERROR, "Unsupported audio sample format for SHM: %s\n", av_get_sample_fmt_name(st->codecpar->format));
                 ret = AVERROR(EINVAL);
@@ -144,30 +124,20 @@ static int shm_write_header(AVFormatContext *s) {
     av_strlcpy(header.shm_file, c->shm_name, sizeof(header.shm_file));
     header.version = 1; // Protocol version
 
-    // Write SHMHeader to the pipe
-    if (fwrite(&header, 1, sizeof(header), c->pipe_fp) != sizeof(header)) {
-        av_log(s, AV_LOG_ERROR, "Failed to write SHMHeader to pipe: %s\n", strerror(errno));
-        ret = AVERROR(EIO);
-        goto fail;
-    }
-    fflush(c->pipe_fp); // Ensure header is sent immediately
+    // Write SHMHeader to s->pb (AVIOContext)
+    avio_write(s->pb, (uint8_t*)&header, sizeof(header));
+    avio_flush(s->pb); // Ensure header is sent immediately
+    // No direct error return from avio_write, assume success if avio_flush doesn't fail
 
     // 2. Create/Open the shared memory segment
     size_t required_shm_size = 0;
     if (header.frametype == 0) { // Video
-        // Use av_image_get_buffer_size for video frames
         required_shm_size = av_image_get_buffer_size(header.pix_fmt, header.width, header.height, 1);
     } else { // Audio
-        // Calculate a buffer size large enough for audio frames
-        // A common approach is to buffer a few seconds of audio at the max expected sample rate/channels/bit depth
-        // Let's assume 2 seconds buffer for audio
-        required_shm_size = (size_t)header.sample_rate * header.channels * (header.bit_depth / 8) * 2;
+        required_shm_size = (size_t)header.sample_rate * header.channels * (header.bit_depth / 8) * 2; // 2 seconds buffer
         if (required_shm_size == 0 && st->codecpar->frame_size > 0) {
-            // Fallback: if sample_rate or channels are zero, but frame_size is known (e.g. for PCM)
-            // Calculate size for one frame
             required_shm_size = (size_t)st->codecpar->frame_size * st->codecpar->ch_layout.nb_channels * (header.bit_depth / 8);
         }
-        // Ensure minimum size if calculated size is too small or zero
         if (required_shm_size < 4096) required_shm_size = 4096; // Minimum page size
     }
 
@@ -201,10 +171,6 @@ static int shm_write_header(AVFormatContext *s) {
     return 0;
 
 fail:
-    if (c->pipe_fp) {
-        fclose(c->pipe_fp);
-        c->pipe_fp = NULL;
-    }
     return ret;
 }
 
@@ -213,19 +179,14 @@ static int shm_write_packet(AVFormatContext *s, AVPacket *pkt) {
     SHMMuxerContext *c = s->priv_data;
     FrameHeader frame_header = {0};
 
-    if (!c->buffer || !c->pipe_fp) {
-        av_log(s, AV_LOG_ERROR, "SHM muxer context not properly initialized.\n");
+    if (!c->buffer || !s->pb) {
+        av_log(s, AV_LOG_ERROR, "SHM muxer context or AVIOContext not properly initialized.\n");
         return AVERROR(EIO);
     }
 
     // Ensure packet data fits within the shared memory buffer
     if (pkt->size > c->buffer_size) {
         av_log(s, AV_LOG_ERROR, "Packet size (%d) exceeds shared memory buffer size (%d). Dropping packet.\n", pkt->size, c->buffer_size);
-        // It's crucial to return the number of bytes consumed by the muxer,
-        // even if the packet is dropped. If we return <0, FFmpeg will consider it an error.
-        // Returning 0 might cause FFmpeg to resend the packet.
-        // For a muxer, typically you return pkt->size on success.
-        // If we truly can't handle it, AVERROR(ENOSPC) or similar might be appropriate.
         return pkt->size; // Indicate packet was "handled" even if dropped.
     }
 
@@ -237,12 +198,10 @@ static int shm_write_packet(AVFormatContext *s, AVPacket *pkt) {
     frame_header.size = pkt->size;
     frame_header.pts = pkt->pts; // Use packet PTS directly
 
-    // Write FrameHeader to the pipe
-    if (fwrite(&frame_header, 1, sizeof(frame_header), c->pipe_fp) != sizeof(frame_header)) {
-        av_log(s, AV_LOG_ERROR, "Failed to write FrameHeader to pipe: %s\n", strerror(errno));
-        return AVERROR(EIO);
-    }
-    fflush(c->pipe_fp); // Ensure header is sent immediately
+    // Write FrameHeader to s->pb (AVIOContext)
+    avio_write(s->pb, (uint8_t*)&frame_header, sizeof(frame_header));
+    avio_flush(s->pb); // Ensure header is sent immediately
+    // No direct error return from avio_write, assume success if avio_flush doesn't fail
 
     return pkt->size;
 }
@@ -252,15 +211,11 @@ static int shm_write_trailer(AVFormatContext *s) {
     SHMMuxerContext *c = s->priv_data;
     FrameHeader eof_header = {0};
 
-    // Send EOF command
-    eof_header.cmdtype = 2; // EOF command
-    if (c->pipe_fp) { // Check if pipe_fp is not NULL before trying to write/close
-        if (fwrite(&eof_header, 1, sizeof(eof_header), c->pipe_fp) != sizeof(eof_header)) {
-            av_log(s, AV_LOG_WARNING, "Failed to write EOF header to pipe: %s\n", strerror(errno));
-        }
-        fflush(c->pipe_fp);
-        fclose(c->pipe_fp);
-        c->pipe_fp = NULL;
+    if (s->pb) {
+        // Send EOF command
+        eof_header.cmdtype = 2; // EOF command
+        avio_write(s->pb, (uint8_t*)&eof_header, sizeof(eof_header));
+        avio_flush(s->pb); // Ensure EOF is sent immediately
     }
 
     // Unmap and close shared memory
@@ -273,11 +228,10 @@ static int shm_write_trailer(AVFormatContext *s) {
         c->shm_fd = -1;
     }
 
-    // Unlink shared memory and pipe
+    // Unlink shared memory
     shm_unlink(c->shm_name);
-    unlink(c->pipe_name); // Unlink the named pipe
 
-    av_log(s, AV_LOG_INFO, "SHM muxer closed. Shared memory '%s' and pipe '%s' unlinked.\n", c->shm_name, c->pipe_name);
+    av_log(s, AV_LOG_INFO, "SHM muxer closed. Shared memory '%s' unlinked.\n", c->shm_name);
     return 0;
 }
 
@@ -286,7 +240,6 @@ static int shm_write_trailer(AVFormatContext *s) {
 #define E AV_OPT_FLAG_ENCODING_PARAM
 static const AVOption shm_muxer_options[] = {
     {"shm_name", "Name of the shared memory segment", OFFSET(shm_name), AV_OPT_TYPE_STRING, {.str = NULL}, 0, 0, E},
-    {"pipe_name", "Name of the communication pipe (FIFO)", OFFSET(pipe_name), AV_OPT_TYPE_STRING, {.str = NULL}, 0, 0, E},
     {NULL},
 };
 
