@@ -4,7 +4,28 @@
 #include <stdint.h>
 
 /**
- * @brief Header written once at the beginning of the shared memory.
+ * @brief Control block for the shared memory ring buffer.
+ *
+ * This structure is placed at the beginning of the shared memory region
+ * and is used to synchronize the producer and consumer.
+ */
+typedef struct {
+    // Index of the buffer slot the producer is currently writing to.
+    uint32_t write_index;
+
+    // Index of the buffer slot the consumer is currently reading from.
+    uint32_t read_index;
+    
+    // The total number of buffer slots.
+    uint32_t num_buffers;
+
+    // A flag to signal the end of the stream.
+    volatile uint32_t eof;
+} SHMControlBlock;
+
+
+/**
+ * @brief Header written once at the beginning of the pipe.
  *
  * This structure contains the video stream's properties.
  */
@@ -22,7 +43,7 @@ typedef struct {
 } SHMHeader;
 
 /**
- * @brief Header written before each frame in the shared memory.
+ * @brief Header written before each frame in the pipe.
  *
  * This structure contains the size and timestamp of the following frame.
  */

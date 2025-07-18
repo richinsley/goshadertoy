@@ -40,7 +40,7 @@ type OffscreenRenderer struct {
 	yuvTextureIDs     [3]uint32
 }
 
-var havesetoptions = false
+const numBuffers = 3 // Use a ring buffer with 3 slots for all modes
 
 // getFormatForBitDepth controls the pixel format for FFmpeg readback.
 func getFormatForBitDepth(bitDepth int) (glInternalFormat int32, glpixelFormat uint32, glpixelType uint32, ffmpegInPixFmt int, ffmpegOutPixFmt string) {
@@ -52,11 +52,9 @@ func getFormatForBitDepth(bitDepth int) (glInternalFormat int32, glpixelFormat u
 	// AV_PIX_FMT_YUV444P10BE	67
 	switch bitDepth {
 	case 10, 12:
-		// For 10/12-bit, we render to a 16-bit unsigned integer texture and read back as 16-bit unsigned shorts.
-		// using full 444 for encoding breaks several decoders, so we'll use 422 instead for now.
-		return gl.R16UI, gl.RED_INTEGER, gl.UNSIGNED_SHORT, 68, "p010le" //"yuv444p10le" "p010le"
+		return gl.R16UI, gl.RED_INTEGER, gl.UNSIGNED_SHORT, 68, "p010le"
 	default: // 8-bit
-		return gl.R8UI, gl.RED_INTEGER, gl.UNSIGNED_BYTE, 5, "nv12" //"yuv444p"
+		return gl.R8UI, gl.RED_INTEGER, gl.UNSIGNED_BYTE, 5, "nv12"
 	}
 }
 func NewOffscreenRenderer(width, height, bitDepth, numPBOs int) (*OffscreenRenderer, error) {
@@ -198,7 +196,6 @@ func (or *OffscreenRenderer) readYUVPixelsAsync(width, height int) ([]byte, erro
 }
 
 func (r *Renderer) getArgs(options *options.ShaderOptions, ffmpegOutPixFmt string) (inputArgs ffmpeg.KwArgs, outputArgs ffmpeg.KwArgs) {
-	// Describe the incoming raw YUV 4:4:4 stream from the shader. This is common for all platforms.
 	inputArgs = ffmpeg.KwArgs{
 		"f":               "shm_demuxer",
 		"color_range":     "tv",
@@ -209,34 +206,26 @@ func (r *Renderer) getArgs(options *options.ShaderOptions, ffmpegOutPixFmt strin
 
 	outputArgs = ffmpeg.KwArgs{}
 
-	// Platform-specific hardware acceleration logic
 	switch runtime.GOOS {
 	case "linux":
 		log.Println("Using Linux (NVENC) hardware acceleration.")
-		// The filter chain uploads the frame to the GPU, converts the pixel format, and passes it to the NVENC encoder.
 		outputArgs["vf"] = fmt.Sprintf("hwupload_cuda,scale_cuda=format=%s", ffmpegOutPixFmt)
 		if *options.Codec == "hevc" {
 			outputArgs["c:v"] = "hevc_nvenc"
-			outputArgs["preset"] = "p2" // p2, second fastest preset
+			outputArgs["preset"] = "p2"
 		} else {
 			outputArgs["c:v"] = "h264_nvenc"
 			outputArgs["preset"] = "p2"
 		}
-
 	case "darwin":
 		log.Println("Using macOS (VideoToolbox) hardware acceleration.")
-		// The scale_vt filter handles the format conversion on the GPU before sending to the encoder.
-		// Note: The 'hwupload' step is implicit with VideoToolbox filters.
-		// outputArgs["vf"] = fmt.Sprintf("scale_vt=format=%s", ffmpegOutPixFmt)
 		if *options.Codec == "hevc" {
 			outputArgs["c:v"] = "hevc_videotoolbox"
 		} else {
 			outputArgs["c:v"] = "h264_videotoolbox"
 		}
-
 	default:
 		log.Println("Using software encoding pipeline (no hardware acceleration).")
-		// Fallback for other systems (e.g., Windows without NVENC setup)
 		if *options.Codec == "hevc" {
 			outputArgs["c:v"] = "libx265"
 		} else {
@@ -244,34 +233,31 @@ func (r *Renderer) getArgs(options *options.ShaderOptions, ffmpegOutPixFmt strin
 		}
 	}
 
-	// Common output arguments
 	if *options.BitDepth > 8 {
 		outputArgs["color_primaries"] = "bt2020"
 		outputArgs["color_trc"] = "smpte2084" // PQ
 		outputArgs["colorspace"] = "bt2020nc"
 	}
-
 	outputArgs["b:v"] = "25M"
-	// outputArgs["pix_fmt"] = ffmpegOutPixFmt
 
 	if *options.Codec == "hevc" && (*options.OutputFile)[len(*options.OutputFile)-4:] == ".mp4" {
 		outputArgs["tag:v"] = "hvc1"
 	}
-
 	if *options.Mode == "stream" {
 		outputArgs["f"] = "mpegts"
 	}
-
 	return
 }
 
+// runEncoder is the Consumer. It sets up FFmpeg and consumes frames from frameChan.
 func (r *Renderer) runEncoder(options *options.ShaderOptions, frameChan <-chan *Frame, doneChan chan<- error) {
-	shmNameStr := "/goshadertoy"
+	shmNameStr := "goshadertoy_video"
 	bytesPerPixel := 1
 	if r.offscreenRenderer.bitDepth > 8 {
 		bytesPerPixel = 2
 	}
-	shmSize := *options.Width * *options.Height * bytesPerPixel * 3
+	frameSize := *options.Width * *options.Height * bytesPerPixel * 3
+	shmSize := int(unsafe.Sizeof(C.SHMControlBlock{})) + (frameSize * numBuffers)
 
 	shm, err := sharedmemory.CreateSharedMemory(shmNameStr, shmSize)
 	if err != nil {
@@ -279,6 +265,12 @@ func (r *Renderer) runEncoder(options *options.ShaderOptions, frameChan <-chan *
 		return
 	}
 	defer shm.Close()
+
+	controlBlockPtr := (*C.SHMControlBlock)(shm.GetPtr())
+	controlBlockPtr.write_index = 0
+	controlBlockPtr.read_index = 0
+	controlBlockPtr.num_buffers = numBuffers
+	controlBlockPtr.eof = 0
 
 	header := C.SHMHeader{}
 	shmFilePtr := (*[512]C.char)(unsafe.Pointer(&header.shm_file))
@@ -316,50 +308,31 @@ func (r *Renderer) runEncoder(options *options.ShaderOptions, frameChan <-chan *
 		return
 	}
 
-	ticker := time.NewTicker(time.Second / time.Duration(*options.FPS))
-	defer ticker.Stop()
-
-	var latestFrame *Frame
-	var encoderPTS int64 = 0
-
-	for {
-		select {
-		case <-ticker.C:
-			select {
-			case newFrame, ok := <-frameChan:
-				if !ok {
-					goto endLoop
-				}
-				latestFrame = newFrame
-			default:
-				if latestFrame == nil {
-					continue
-				}
-			}
-
-			if _, err := shm.WriteAt(latestFrame.Pixels, 0); err != nil {
-				log.Printf("Error writing pixel data on frame %d: %v", encoderPTS, err)
-				break
-			}
-
-			frameHeader := C.FrameHeader{
-				cmdtype: C.uint32_t(0),
-				size:    C.uint32_t(len(latestFrame.Pixels)),
-				pts:     C.int64_t(encoderPTS),
-			}
-			encoderPTS++
-
-			frameHeaderBytes := (*[unsafe.Sizeof(frameHeader)]byte)(unsafe.Pointer(&frameHeader))[:]
-			if _, err := pipeWriter.Write(frameHeaderBytes); err != nil {
-				break
-			}
-		case err := <-errc:
-			doneChan <- err
-			return
+	for frame := range frameChan {
+		for (controlBlockPtr.write_index+1)%controlBlockPtr.num_buffers == controlBlockPtr.read_index {
+			time.Sleep(1 * time.Millisecond)
 		}
+
+		writeOffset := int64(unsafe.Sizeof(C.SHMControlBlock{})) + (int64(controlBlockPtr.write_index) * int64(frameSize))
+		if _, err := shm.WriteAt(frame.Pixels, writeOffset); err != nil {
+			log.Printf("Error writing pixel data on frame %d: %v", frame.PTS, err)
+			break
+		}
+
+		frameHeader := C.FrameHeader{
+			cmdtype: C.uint32_t(0),
+			size:    C.uint32_t(len(frame.Pixels)),
+			pts:     C.int64_t(frame.PTS),
+		}
+		frameHeaderBytes := (*[unsafe.Sizeof(frameHeader)]byte)(unsafe.Pointer(&frameHeader))[:]
+		if _, err := pipeWriter.Write(frameHeaderBytes); err != nil {
+			log.Printf("Error writing frame header to pipe on frame %d: %v", frame.PTS, err)
+			break
+		}
+		controlBlockPtr.write_index = (controlBlockPtr.write_index + 1) % controlBlockPtr.num_buffers
 	}
 
-endLoop:
+	controlBlockPtr.eof = 1
 	eofHeader := C.FrameHeader{cmdtype: C.uint32_t(2)}
 	eofHeaderBytes := (*[unsafe.Sizeof(eofHeader)]byte)(unsafe.Pointer(&eofHeader))[:]
 	if _, err := pipeWriter.Write(eofHeaderBytes); err != nil {
@@ -376,9 +349,10 @@ func (r *Renderer) RunOffscreen(options *options.ShaderOptions) error {
 	return r.runRecordMode(options)
 }
 
+// runStreamMode is a Producer. It renders frames and sends them to the encoder.
 func (r *Renderer) runStreamMode(options *options.ShaderOptions) error {
 	log.Println("Starting in stream mode...")
-	frameChan := make(chan *Frame, len(r.offscreenRenderer.pbos)/3)
+	frameChan := make(chan *Frame, numBuffers)
 	encoderDoneChan := make(chan error, 1)
 
 	go r.runEncoder(options, frameChan, encoderDoneChan)
@@ -397,6 +371,13 @@ func (r *Renderer) runStreamMode(options *options.ShaderOptions) error {
 	var frameCounter int64 = 0
 
 	for {
+		select {
+		case err := <-encoderDoneChan:
+			log.Printf("Encoder finished with error: %v", err)
+			return err
+		default:
+		}
+
 		elapsedTime := time.Since(startTime)
 		shouldHaveRendered := int64(float64(elapsedTime) / float64(frameDuration))
 
@@ -407,7 +388,6 @@ func (r *Renderer) runStreamMode(options *options.ShaderOptions) error {
 
 		for frameCounter < shouldHaveRendered {
 			simTime := float64(frameCounter) * frameDuration.Seconds()
-
 			uniforms := &inputs.Uniforms{
 				Time:      float32(simTime),
 				TimeDelta: float32(frameDuration.Seconds()),
@@ -428,64 +408,29 @@ func (r *Renderer) runStreamMode(options *options.ShaderOptions) error {
 				return <-encoderDoneChan
 			}
 
-			frameChan <- &Frame{Pixels: pixels, PTS: frameCounter}
-			frameCounter++
+			select {
+			case frameChan <- &Frame{Pixels: pixels, PTS: frameCounter}:
+				frameCounter++
+			default:
+				log.Println("Warning: Frame channel is full. Dropping frame.")
+				frameCounter++
+			}
 		}
 	}
 }
 
+// runRecordMode is a Producer. It renders a fixed number of frames and sends them to the encoder.
 func (r *Renderer) runRecordMode(options *options.ShaderOptions) error {
 	log.Println("Starting in record mode...")
+	frameChan := make(chan *Frame, numBuffers)
+	encoderDoneChan := make(chan error, 1)
+
+	// Start the consumer goroutine
+	go r.runEncoder(options, frameChan, encoderDoneChan)
+
 	totalFrames := int(*options.Duration * float64(*options.FPS))
-	shmNameStr := "/goshadertoy"
-	bytesPerPixel := 1
-	if r.offscreenRenderer.bitDepth > 8 {
-		bytesPerPixel = 2
-	}
-	shmSize := *options.Width * *options.Height * bytesPerPixel * 3
-
-	shm, err := sharedmemory.CreateSharedMemory(shmNameStr, shmSize)
-	if err != nil {
-		return fmt.Errorf("failed to create shared memory: %w", err)
-	}
-	defer shm.Close()
-
-	header := C.SHMHeader{}
-	shmFilePtr := (*[512]C.char)(unsafe.Pointer(&header.shm_file))
-	shmFilePtr[0] = '/'
-	for i := 0; i < len(shmNameStr) && i < 511; i++ {
-		shmFilePtr[i+1] = C.char(shmNameStr[i])
-	}
-	shmFilePtr[len(shmNameStr)+1] = 0
-
-	_, _, _, ffmpegInPixFmt, ffmpegOutPixFmt := getFormatForBitDepth(r.offscreenRenderer.bitDepth)
-	header.width = C.uint32_t(*options.Width)
-	header.height = C.uint32_t(*options.Height)
-	header.frame_rate = C.uint32_t(*options.FPS)
-	header.pix_fmt = C.int32_t(ffmpegInPixFmt)
-	headerBytes := (*[unsafe.Sizeof(header)]byte)(unsafe.Pointer(&header))[:]
-
-	pipeReader, pipeWriter := io.Pipe()
-	inputArgs, outputArgs := r.getArgs(options, ffmpegOutPixFmt)
-
-	ffmpegCmd := ffmpeg.Input("pipe:", inputArgs).
-		Output(*options.OutputFile, outputArgs).
-		OverWriteOutput().WithInput(pipeReader).ErrorToStdOut()
-
-	if *options.FFMPEGPath != "" {
-		ffmpegCmd = ffmpegCmd.SetFfmpegPath(*options.FFMPEGPath)
-	}
-
-	errc := make(chan error, 1)
-	go func() {
-		errc <- ffmpegCmd.Run()
-	}()
-
-	if _, err := pipeWriter.Write(headerBytes); err != nil {
-		return fmt.Errorf("failed to write header to FFmpeg: %w", err)
-	}
-
 	timeStep := 1.0 / float64(*options.FPS)
+
 	for i := 0; i < totalFrames; i++ {
 		currentTime := float64(i) * timeStep
 		uniforms := &inputs.Uniforms{
@@ -495,40 +440,24 @@ func (r *Renderer) runRecordMode(options *options.ShaderOptions) error {
 			Frame:     int32(i),
 		}
 
-		// Render the frame and get the pixel data
 		r.RenderFrame(currentTime, int32(i), [4]float32{0, 0, 0, 0}, uniforms)
 		r.RenderToYUV()
 
 		gl.BindFramebuffer(gl.READ_FRAMEBUFFER, r.offscreenRenderer.yuvFbo)
 		pixels, err := r.offscreenRenderer.readYUVPixelsAsync(*options.Width, *options.Height)
 		gl.BindFramebuffer(gl.READ_FRAMEBUFFER, 0)
-
 		if err != nil {
+			log.Printf("Error reading pixels on frame %d: %v", i, err)
 			break
 		}
 
-		// Write the latest pixel data to the start of the shared memory buffer.
-		if _, err := shm.WriteAt(pixels, 0); err != nil {
-			break
-		}
-
-		frameHeader := C.FrameHeader{
-			cmdtype: C.uint32_t(0),
-			size:    C.uint32_t(len(pixels)),
-			pts:     C.int64_t(i),
-		}
-		frameHeaderBytes := (*[unsafe.Sizeof(frameHeader)]byte)(unsafe.Pointer(&frameHeader))[:]
-
-		// Write the frame header to the pipe to signal a new frame is ready.
-		if _, err := pipeWriter.Write(frameHeaderBytes); err != nil {
-			break
-		}
+		// Send the rendered frame to the consumer
+		frameChan <- &Frame{Pixels: pixels, PTS: int64(i)}
 	}
 
-	// Send the EOF command down the pipe.
-	eofHeader := C.FrameHeader{cmdtype: C.uint32_t(2)}
-	eofHeaderBytes := (*[unsafe.Sizeof(eofHeader)]byte)(unsafe.Pointer(&eofHeader))[:]
-	pipeWriter.Write(eofHeaderBytes)
-	pipeWriter.Close()
-	return <-errc
+	// Close the channel to signal the producer is done
+	close(frameChan)
+
+	// Wait for the consumer to finish
+	return <-encoderDoneChan
 }

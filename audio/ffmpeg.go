@@ -3,7 +3,6 @@ package audio
 import (
 	"bytes"
 	"encoding/binary"
-	"fmt"
 	"io"
 	"log"
 	"os/exec"
@@ -14,6 +13,14 @@ import (
 	"github.com/richinsley/goshadertoy/sharedmemory"
 	ffmpeg "github.com/u2takey/ffmpeg-go"
 )
+
+// SHMControlBlock must exactly match the C definition.
+type SHMControlBlock struct {
+	WriteIndex uint32
+	ReadIndex  uint32
+	NumBuffers uint32
+	EOF        uint32
+}
 
 // SHMHeader and FrameHeader structs must exactly match the C definitions.
 type SHMHeader struct {
@@ -133,10 +140,11 @@ func (d *FFmpegAudioDevice) runAudioLoop() {
 	shmNameForGo := strings.TrimPrefix(shmNameFromHeader, "/")
 
 	// Calculate a safe buffer size, giving it some extra room.
-	shmSize := int(shmHeader.SampleRate*shmHeader.Channels*(shmHeader.BitDepth/8)) * 2
-	if shmSize < 4096 {
-		shmSize = 4096
+	frameSize := int(shmHeader.SampleRate*shmHeader.Channels*(shmHeader.BitDepth/8)) * 2
+	if frameSize < 4096 {
+		frameSize = 4096
 	}
+	shmSize := int(unsafe.Sizeof(SHMControlBlock{})) + (frameSize * 3) // 3 buffers
 
 	shm, err := sharedmemory.OpenSharedMemory(shmNameForGo, shmSize)
 	if err != nil {
@@ -145,21 +153,27 @@ func (d *FFmpegAudioDevice) runAudioLoop() {
 	}
 	d.shm = shm
 
+	controlBlockPtr := (*SHMControlBlock)(d.shm.GetPtr())
+
 	// Continuously read audio frames
 	var frameHeader FrameHeader
 	frameHeaderSize := int(unsafe.Sizeof(frameHeader))
 	frameHeaderBuf := make([]byte, frameHeaderSize)
 	totalRead := int64(0)
+
 	for {
+		// This loop is now driven by blocking reads from the pipe.
+		// It will only proceed when FFmpeg sends a header or closes the pipe.
 		select {
 		case <-d.stopChan:
+			log.Println("Stop signal received, exiting audio loop.")
 			return
 		default:
-			// Read the next frame header from the pipe
+			// This is now a blocking read. The goroutine will sleep here until data is available.
 			_, err := io.ReadFull(d.pipeReader, frameHeaderBuf)
 			if err != nil {
 				if err == io.EOF || err == io.ErrClosedPipe {
-					log.Println("FFmpeg pipe closed. Stopping audio loop.")
+					log.Println("FFmpeg pipe closed. Stopping audio loop gracefully.")
 				} else {
 					log.Printf("Error reading FrameHeader from pipe: %v", err)
 				}
@@ -175,13 +189,24 @@ func (d *FFmpegAudioDevice) runAudioLoop() {
 			}
 
 			if frameHeader.CmdType == 0 { // Audio Data
-				if frameHeader.Size == 0 {
+				// We have a header, so a frame's data should be in the ring buffer.
+				// This check is a safeguard.
+				if controlBlockPtr.ReadIndex == controlBlockPtr.WriteIndex {
+					log.Println("Warning: Received a data header but the ring buffer is empty. Skipping.")
 					continue
 				}
+
+				if frameHeader.Size == 0 {
+					controlBlockPtr.ReadIndex = (controlBlockPtr.ReadIndex + 1) % controlBlockPtr.NumBuffers
+					continue
+				}
+
+				readOffset := int64(unsafe.Sizeof(SHMControlBlock{})) + (int64(controlBlockPtr.ReadIndex) * int64(frameSize))
 				audioData := make([]byte, frameHeader.Size)
-				n, err := d.shm.ReadAt(audioData, 0)
+				n, err := d.shm.ReadAt(audioData, readOffset)
 				if err != nil || n != int(frameHeader.Size) {
 					log.Printf("Error reading audio data from shared memory: %v", err)
+					controlBlockPtr.ReadIndex = (controlBlockPtr.ReadIndex + 1) % controlBlockPtr.NumBuffers
 					continue
 				}
 				totalRead += int64(n)
@@ -190,8 +215,10 @@ func (d *FFmpegAudioDevice) runAudioLoop() {
 				floatData := make([]float32, len(audioData)/4) // 4 bytes per float32
 				reader := bytes.NewReader(audioData)
 				binary.Read(reader, binary.LittleEndian, &floatData)
-				fmt.Printf("Received frame with PTS %d, size %d bytes\n", frameHeader.Pts, len(audioData))
 				d.audioChan <- floatData
+
+				// Signal that we've consumed the frame by advancing the read pointer.
+				controlBlockPtr.ReadIndex = (controlBlockPtr.ReadIndex + 1) % controlBlockPtr.NumBuffers
 			}
 		}
 	}
