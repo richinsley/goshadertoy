@@ -10,36 +10,32 @@ import (
 	"syscall"
 	"unsafe"
 
+	"github.com/richinsley/goshadertoy/semaphore"
 	"github.com/richinsley/goshadertoy/sharedmemory"
 	ffmpeg "github.com/u2takey/ffmpeg-go"
 )
 
-// SHMControlBlock must exactly match the C definition.
-type SHMControlBlock struct {
-	WriteIndex uint32
-	ReadIndex  uint32
-	NumBuffers uint32
-	EOF        uint32
-}
-
 // SHMHeader and FrameHeader structs must exactly match the C definitions.
 type SHMHeader struct {
-	ShmFile    [512]byte
-	Version    uint32
-	FrameType  uint32 // 0 for video, 1 for audio
-	FrameRate  uint32
-	Channels   uint32
-	SampleRate uint32
-	BitDepth   uint32
-	Width      uint32
-	Height     uint32
-	PixFmt     int32
+	ShmFile      [512]byte
+	EmptySemName [256]byte
+	FullSemName  [256]byte
+	Version      uint32
+	FrameType    uint32 // 0 for video, 1 for audio
+	FrameRate    uint32
+	Channels     uint32
+	SampleRate   uint32
+	BitDepth     uint32
+	Width        uint32
+	Height       uint32
+	PixFmt       int32
 }
 
 type FrameHeader struct {
 	CmdType uint32 // 0 for data, 2 for EOF
 	Size    uint32
 	Pts     int64
+	Offset  uint64 // The exact byte offset for the frame
 }
 
 // FFmpegAudioDevice implements the AudioDevice interface using FFmpeg.
@@ -51,12 +47,13 @@ type FFmpegAudioDevice struct {
 	audioChan   chan []float32
 	stopChan    chan struct{}
 	shm         *sharedmemory.SharedMemory
+	emptySem    semaphore.Semaphore
+	fullSem     semaphore.Semaphore
 	sampleRate  int
 	isStreaming bool
 }
 
 // NewFFmpegAudioDevice creates a new audio device that sources its audio from an FFmpeg process.
-// The `inputFile` can be a file path or any valid FFmpeg input string (e.g., "avfoundation:default").
 func NewFFmpegAudioDevice(inputFile, ffmpegPath string) *FFmpegAudioDevice {
 	return &FFmpegAudioDevice{
 		inputFile:  inputFile,
@@ -79,7 +76,7 @@ func (d *FFmpegAudioDevice) Start() (<-chan []float32, error) {
 			"c:a": "pcm_f32le",
 		}).
 		WithOutput(pipeWriter).
-		ErrorToStdOut() // Add this to match the working example and handle stderr.
+		ErrorToStdOut()
 
 	if d.ffmpegPath != "" {
 		ffmpegCmd.SetFfmpegPath(d.ffmpegPath)
@@ -90,11 +87,9 @@ func (d *FFmpegAudioDevice) Start() (<-chan []float32, error) {
 	// Now, run the command object we just created and stored.
 	go func() {
 		err := d.cmd.Run()
-		if err != nil {
-			// Don't log expected errors when we interrupt the process
-			if !strings.Contains(err.Error(), "signal: killed") {
-				log.Printf("FFmpeg command finished with error: %v", err)
-			}
+		if err != nil && !strings.Contains(err.Error(), "signal: killed") {
+
+			log.Printf("FFmpeg command finished with error: %v", err)
 		}
 		// When FFmpeg is done (or fails), close the writer. This will unblock
 		// the reader in the main goroutine and signal that there's no more data.
@@ -111,6 +106,12 @@ func (d *FFmpegAudioDevice) runAudioLoop() {
 	defer func() {
 		if d.shm != nil {
 			d.shm.Close()
+		}
+		if d.emptySem != nil {
+			d.emptySem.Close()
+		}
+		if d.fullSem != nil {
+			d.fullSem.Close()
 		}
 		close(d.audioChan)
 		log.Println("FFmpeg audio loop finished.")
@@ -135,41 +136,46 @@ func (d *FFmpegAudioDevice) runAudioLoop() {
 	d.sampleRate = int(shmHeader.SampleRate)
 	log.Printf("Received SHMHeader from FFmpeg: SampleRate=%d, Channels=%d", d.sampleRate, shmHeader.Channels)
 
-	// Open the shared memory segment
 	shmNameFromHeader := string(shmHeader.ShmFile[:bytes.IndexByte(shmHeader.ShmFile[:], 0)])
 	shmNameForGo := strings.TrimPrefix(shmNameFromHeader, "/")
+	emptySemName := string(shmHeader.EmptySemName[:bytes.IndexByte(shmHeader.EmptySemName[:], 0)])
+	fullSemName := string(shmHeader.FullSemName[:bytes.IndexByte(shmHeader.FullSemName[:], 0)])
 
-	// Calculate a safe buffer size, giving it some extra room.
+	var err error
+	d.emptySem, err = semaphore.OpenSemaphore(emptySemName)
+	if err != nil {
+		log.Printf("Failed to open empty semaphore '%s': %v", emptySemName, err)
+		return
+	}
+	d.fullSem, err = semaphore.OpenSemaphore(fullSemName)
+	if err != nil {
+		log.Printf("Failed to open full semaphore '%s': %v", fullSemName, err)
+		return
+	}
+
+	// Calculate SHM size based on producer's logic
 	frameSize := int(shmHeader.SampleRate*shmHeader.Channels*(shmHeader.BitDepth/8)) * 2
 	if frameSize < 4096 {
 		frameSize = 4096
 	}
-	shmSize := int(unsafe.Sizeof(SHMControlBlock{})) + (frameSize * 3) // 3 buffers
+	shmSize := int(unsafe.Sizeof(shmHeader)) + (frameSize * 3) // numBuffers = 3
 
-	shm, err := sharedmemory.OpenSharedMemory(shmNameForGo, shmSize)
+	d.shm, err = sharedmemory.OpenSharedMemory(shmNameForGo, shmSize)
 	if err != nil {
-		log.Fatalf("Failed to open shared memory '%s': %v", shmNameForGo, err)
+		log.Printf("Failed to open shared memory '%s': %v", shmNameForGo, err)
 		return
 	}
-	d.shm = shm
 
-	controlBlockPtr := (*SHMControlBlock)(d.shm.GetPtr())
-
-	// Continuously read audio frames
 	var frameHeader FrameHeader
 	frameHeaderSize := int(unsafe.Sizeof(frameHeader))
 	frameHeaderBuf := make([]byte, frameHeaderSize)
-	totalRead := int64(0)
 
 	for {
-		// This loop is now driven by blocking reads from the pipe.
-		// It will only proceed when FFmpeg sends a header or closes the pipe.
 		select {
 		case <-d.stopChan:
 			log.Println("Stop signal received, exiting audio loop.")
 			return
 		default:
-			// This is now a blocking read. The goroutine will sleep here until data is available.
 			_, err := io.ReadFull(d.pipeReader, frameHeaderBuf)
 			if err != nil {
 				if err == io.EOF || err == io.ErrClosedPipe {
@@ -184,41 +190,30 @@ func (d *FFmpegAudioDevice) runAudioLoop() {
 			binary.Read(buf, binary.LittleEndian, &frameHeader)
 
 			if frameHeader.CmdType == 2 { // EOF
-				log.Println("Received EOF command from FFmpeg. Total bytes read:", totalRead)
+				log.Println("Received EOF command from FFmpeg.")
 				return
 			}
 
 			if frameHeader.CmdType == 0 { // Audio Data
-				// We have a header, so a frame's data should be in the ring buffer.
-				// This check is a safeguard.
-				if controlBlockPtr.ReadIndex == controlBlockPtr.WriteIndex {
-					log.Println("Warning: Received a data header but the ring buffer is empty. Skipping.")
-					continue
+				if err := d.fullSem.Acquire(); err != nil {
+					log.Printf("Error acquiring full semaphore: %v", err)
+					return
 				}
 
-				if frameHeader.Size == 0 {
-					controlBlockPtr.ReadIndex = (controlBlockPtr.ReadIndex + 1) % controlBlockPtr.NumBuffers
-					continue
-				}
-
-				readOffset := int64(unsafe.Sizeof(SHMControlBlock{})) + (int64(controlBlockPtr.ReadIndex) * int64(frameSize))
 				audioData := make([]byte, frameHeader.Size)
-				n, err := d.shm.ReadAt(audioData, readOffset)
+				n, err := d.shm.ReadAt(audioData, int64(frameHeader.Offset))
 				if err != nil || n != int(frameHeader.Size) {
 					log.Printf("Error reading audio data from shared memory: %v", err)
-					controlBlockPtr.ReadIndex = (controlBlockPtr.ReadIndex + 1) % controlBlockPtr.NumBuffers
-					continue
+				} else {
+					floatData := make([]float32, len(audioData)/4)
+					reader := bytes.NewReader(audioData)
+					binary.Read(reader, binary.LittleEndian, &floatData)
+					d.audioChan <- floatData
 				}
-				totalRead += int64(n)
 
-				// Convert byte slice to float32 slice
-				floatData := make([]float32, len(audioData)/4) // 4 bytes per float32
-				reader := bytes.NewReader(audioData)
-				binary.Read(reader, binary.LittleEndian, &floatData)
-				d.audioChan <- floatData
-
-				// Signal that we've consumed the frame by advancing the read pointer.
-				controlBlockPtr.ReadIndex = (controlBlockPtr.ReadIndex + 1) % controlBlockPtr.NumBuffers
+				if err := d.emptySem.Release(); err != nil {
+					log.Printf("Error releasing empty semaphore: %v", err)
+				}
 			}
 		}
 	}

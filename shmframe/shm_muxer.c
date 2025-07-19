@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <errno.h>
 #include <math.h>
+#include <semaphore.h>
 
 #include "protocol.h"
 
@@ -26,8 +27,13 @@ typedef struct {
     int buffer_size;
     int shm_fd;
     char shm_name[512];
+    char empty_sem_name[256];
+    char full_sem_name[256];
+    sem_t *empty_sem;
+    sem_t *full_sem;
     SHMControlBlock *control_block;
     uint8_t *frame_buffers[NUM_BUFFERS];
+    uint32_t write_index; // Local write index for the producer
 } SHMMuxerContext;
 
 // write_header: Called when FFmpeg starts writing the output
@@ -48,7 +54,10 @@ static int shm_write_header(AVFormatContext *s) {
     
     st = s->streams[0];
     
-    snprintf(c->shm_name, sizeof(c->shm_name), "/goshadertoy_%d", getpid());
+    pid_t pid = getpid();
+    snprintf(c->shm_name, sizeof(c->shm_name), "/goshadertoy_audio_%d", pid);
+    snprintf(c->empty_sem_name, sizeof(c->empty_sem_name), "goshadertoy_audio_empty_%d", pid);
+    snprintf(c->full_sem_name, sizeof(c->full_sem_name), "goshadertoy_audio_full_%d", pid);
 
     // Populate SHMHeader based on the stream FFmpeg has provided
     if (st->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
@@ -73,6 +82,8 @@ static int shm_write_header(AVFormatContext *s) {
     }
 
     av_strlcpy(header.shm_file, c->shm_name, sizeof(header.shm_file));
+    av_strlcpy(header.empty_sem_name, c->empty_sem_name, sizeof(header.empty_sem_name));
+    av_strlcpy(header.full_sem_name, c->full_sem_name, sizeof(header.full_sem_name));
     header.version = 1;
 
     avio_write(s->pb, (uint8_t*)&header, sizeof(header));
@@ -86,6 +97,18 @@ static int shm_write_header(AVFormatContext *s) {
     c->shm_fd = shm_open(c->shm_name, O_RDWR | O_CREAT, 0666);
     if (c->shm_fd < 0) {
         av_log(s, AV_LOG_ERROR, "Failed to create shared memory '%s': %s\n", c->shm_name, strerror(errno));
+        return AVERROR(errno);
+    }
+
+    c->empty_sem = sem_open(c->empty_sem_name, O_CREAT, 0666, NUM_BUFFERS);
+    if (c->empty_sem == SEM_FAILED) {
+        av_log(s, AV_LOG_ERROR, "Failed to create empty semaphore '%s': %s\n", c->empty_sem_name, strerror(errno));
+        return AVERROR(errno);
+    }
+
+    c->full_sem = sem_open(c->full_sem_name, O_CREAT, 0666, 0);
+    if (c->full_sem == SEM_FAILED) {
+        av_log(s, AV_LOG_ERROR, "Failed to create full semaphore '%s': %s\n", c->full_sem_name, strerror(errno));
         return AVERROR(errno);
     }
 
@@ -104,10 +127,9 @@ static int shm_write_header(AVFormatContext *s) {
     }
 
     c->control_block = (SHMControlBlock*)c->buffer;
-    c->control_block->write_index = 0;
-    c->control_block->read_index = 0;
     c->control_block->num_buffers = NUM_BUFFERS;
     c->control_block->eof = 0;
+    c->write_index = 0; // Initialize local write index
 
     for(int i=0; i < NUM_BUFFERS; i++) {
         c->frame_buffers[i] = c->buffer + sizeof(SHMControlBlock) + (i * frame_size);
@@ -123,12 +145,11 @@ static int shm_write_header(AVFormatContext *s) {
 static int shm_write_packet(AVFormatContext *s, AVPacket *pkt) {
     SHMMuxerContext *c = s->priv_data;
 
-    // Wait for a free slot in the ring buffer
-    while ((c->control_block->write_index + 1) % c->control_block->num_buffers == c->control_block->read_index) {
-        usleep(1000); // Sleep for 1ms
+    if (sem_wait(c->empty_sem) < 0) {
+        av_log(s, AV_LOG_ERROR, "sem_wait(empty_sem) failed: %s\n", strerror(errno));
+        return AVERROR(errno);
     }
-
-    uint8_t *write_buffer = c->frame_buffers[c->control_block->write_index];
+    uint8_t *write_buffer = c->frame_buffers[c->write_index];
 
     FrameHeader frame_header = {0};
     memcpy(write_buffer, pkt->data, pkt->size);
@@ -138,9 +159,13 @@ static int shm_write_packet(AVFormatContext *s, AVPacket *pkt) {
     avio_write(s->pb, (uint8_t*)&frame_header, sizeof(frame_header));
     avio_flush(s->pb);
     
-    // Update the write index
-    c->control_block->write_index = (c->control_block->write_index + 1) % c->control_block->num_buffers;
+    // Update the local write index
+    c->write_index = (c->write_index + 1) % c->control_block->num_buffers;
 
+    if (sem_post(c->full_sem) < 0) {
+        av_log(s, AV_LOG_ERROR, "sem_post(full_sem) failed: %s\n", strerror(errno));
+        return AVERROR(errno);
+    }
     return pkt->size;
 }
 
@@ -155,6 +180,15 @@ static int shm_write_trailer(AVFormatContext *s) {
     munmap(c->buffer, c->buffer_size);
     close(c->shm_fd);
     shm_unlink(c->shm_name);
+
+    if (c->empty_sem != SEM_FAILED) {
+        sem_close(c->empty_sem);
+        sem_unlink(c->empty_sem_name);
+    }
+    if (c->full_sem != SEM_FAILED) {
+        sem_close(c->full_sem);
+        sem_unlink(c->full_sem_name);
+    }
     return 0;
 }
 

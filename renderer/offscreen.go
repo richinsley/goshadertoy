@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"os"
 	"runtime"
 	"time"
 	"unsafe"
@@ -11,6 +12,7 @@ import (
 	gl "github.com/go-gl/gl/v4.1-core/gl"
 	inputs "github.com/richinsley/goshadertoy/inputs"
 	options "github.com/richinsley/goshadertoy/options"
+	"github.com/richinsley/goshadertoy/semaphore"
 	sharedmemory "github.com/richinsley/goshadertoy/sharedmemory"
 	ffmpeg "github.com/u2takey/ffmpeg-go"
 )
@@ -251,7 +253,14 @@ func (r *Renderer) getArgs(options *options.ShaderOptions, ffmpegOutPixFmt strin
 
 // runEncoder is the Consumer. It sets up FFmpeg and consumes frames from frameChan.
 func (r *Renderer) runEncoder(options *options.ShaderOptions, frameChan <-chan *Frame, doneChan chan<- error) {
-	shmNameStr := "goshadertoy_video"
+	pid := os.Getpid()
+	shmNameStr := fmt.Sprintf("goshadertoy_video_%d", pid)
+	emptySemName := fmt.Sprintf("goshadertoy_video_empty_%d", pid)
+	fullSemName := fmt.Sprintf("goshadertoy_video_full_%d", pid)
+
+	semaphore.RemoveSemaphore(emptySemName)
+	semaphore.RemoveSemaphore(fullSemName)
+
 	bytesPerPixel := 1
 	if r.offscreenRenderer.bitDepth > 8 {
 		bytesPerPixel = 2
@@ -266,11 +275,27 @@ func (r *Renderer) runEncoder(options *options.ShaderOptions, frameChan <-chan *
 	}
 	defer shm.Close()
 
+	emptySem, err := semaphore.NewSemaphore(emptySemName, numBuffers)
+	if err != nil {
+		doneChan <- fmt.Errorf("failed to create empty semaphore: %w", err)
+		return
+	}
+	defer emptySem.Close()
+	defer semaphore.RemoveSemaphore(emptySemName)
+
+	fullSem, err := semaphore.NewSemaphore(fullSemName, 0)
+	if err != nil {
+		doneChan <- fmt.Errorf("failed to create full semaphore: %w", err)
+		return
+	}
+	defer fullSem.Close()
+	defer semaphore.RemoveSemaphore(fullSemName)
+
 	controlBlockPtr := (*C.SHMControlBlock)(shm.GetPtr())
-	controlBlockPtr.write_index = 0
-	controlBlockPtr.read_index = 0
 	controlBlockPtr.num_buffers = numBuffers
 	controlBlockPtr.eof = 0
+
+	var writeIndex uint32 = 0
 
 	header := C.SHMHeader{}
 	shmFilePtr := (*[512]C.char)(unsafe.Pointer(&header.shm_file))
@@ -280,6 +305,17 @@ func (r *Renderer) runEncoder(options *options.ShaderOptions, frameChan <-chan *
 	}
 	shmFilePtr[len(shmNameStr)+1] = 0
 
+	emptySemNamePtr := (*[256]C.char)(unsafe.Pointer(&header.empty_sem_name))
+	for i := 0; i < len(emptySemName) && i < 255; i++ {
+		emptySemNamePtr[i] = C.char(emptySemName[i])
+	}
+	emptySemNamePtr[len(emptySemName)] = 0
+
+	fullSemNamePtr := (*[256]C.char)(unsafe.Pointer(&header.full_sem_name))
+	for i := 0; i < len(fullSemName) && i < 255; i++ {
+		fullSemNamePtr[i] = C.char(fullSemName[i])
+	}
+	fullSemNamePtr[len(fullSemName)] = 0
 	_, _, _, ffmpegInPixFmt, ffmpegOutPixFmt := getFormatForBitDepth(r.offscreenRenderer.bitDepth)
 	header.width = C.uint32_t(*options.Width)
 	header.height = C.uint32_t(*options.Height)
@@ -309,11 +345,12 @@ func (r *Renderer) runEncoder(options *options.ShaderOptions, frameChan <-chan *
 	}
 
 	for frame := range frameChan {
-		for (controlBlockPtr.write_index+1)%controlBlockPtr.num_buffers == controlBlockPtr.read_index {
-			time.Sleep(1 * time.Millisecond)
+		if err := emptySem.Acquire(); err != nil {
+			log.Printf("Error acquiring empty semaphore: %v", err)
+			break
 		}
 
-		writeOffset := int64(unsafe.Sizeof(C.SHMControlBlock{})) + (int64(controlBlockPtr.write_index) * int64(frameSize))
+		writeOffset := int64(unsafe.Sizeof(C.SHMControlBlock{})) + (int64(writeIndex) * int64(frameSize))
 		if _, err := shm.WriteAt(frame.Pixels, writeOffset); err != nil {
 			log.Printf("Error writing pixel data on frame %d: %v", frame.PTS, err)
 			break
@@ -323,13 +360,20 @@ func (r *Renderer) runEncoder(options *options.ShaderOptions, frameChan <-chan *
 			cmdtype: C.uint32_t(0),
 			size:    C.uint32_t(len(frame.Pixels)),
 			pts:     C.int64_t(frame.PTS),
+			offset:  C.uint64_t(writeOffset),
 		}
 		frameHeaderBytes := (*[unsafe.Sizeof(frameHeader)]byte)(unsafe.Pointer(&frameHeader))[:]
 		if _, err := pipeWriter.Write(frameHeaderBytes); err != nil {
 			log.Printf("Error writing frame header to pipe on frame %d: %v", frame.PTS, err)
 			break
 		}
-		controlBlockPtr.write_index = (controlBlockPtr.write_index + 1) % controlBlockPtr.num_buffers
+
+		writeIndex = (writeIndex + 1) % numBuffers
+
+		if err := fullSem.Release(); err != nil {
+			log.Printf("Error releasing full semaphore: %v", err)
+			break
+		}
 	}
 
 	controlBlockPtr.eof = 1

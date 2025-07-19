@@ -10,12 +10,6 @@
  * and is used to synchronize the producer and consumer.
  */
 typedef struct {
-    // Index of the buffer slot the producer is currently writing to.
-    uint32_t write_index;
-
-    // Index of the buffer slot the consumer is currently reading from.
-    uint32_t read_index;
-    
     // The total number of buffer slots.
     uint32_t num_buffers;
 
@@ -31,6 +25,8 @@ typedef struct {
  */
 typedef struct {
     char shm_file[512];
+    char empty_sem_name[256];
+    char full_sem_name[256];
     uint32_t version;
     uint32_t frametype; // 0 for video, 1 for audio
     uint32_t frame_rate; // Frame rate in frames per second.
@@ -51,6 +47,7 @@ typedef struct {
     uint32_t cmdtype; // 0 for video, 1 for audio, 2 for EOF
     uint32_t size;
     int64_t pts;
+    uint64_t offset; // The exact byte offset for the frame in shared memory
 } FrameHeader;
 
 #endif // PROTOCOL_H
