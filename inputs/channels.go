@@ -77,12 +77,12 @@ func GetChannels(shaderInputs []*api.ShadertoyChannel, width, height int, vao ui
 		case "mic":
 			var newChannel IChannel
 			var err error
-			if options != nil && *options.AudioInput != "" {
+			if options != nil && *options.AudioInputDevice != "" {
 				// Use FFmpeg if the audio-input flag is set
-				newChannel, err = NewMicChannelWithFFmpeg(*options.AudioInput, *options.FFMPEGPath)
+				newChannel, err = NewMicChannelWithFFmpeg(options)
 			} else {
 				// Fallback to the default portaudio microphone
-				newChannel, err = NewMicChannel()
+				newChannel, err = NewMicChannel(options)
 			}
 
 			if err != nil {

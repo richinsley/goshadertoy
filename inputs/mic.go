@@ -9,6 +9,7 @@ import (
 	gl "github.com/go-gl/gl/v4.1-core/gl"
 	fft "github.com/mjibson/go-dsp/fft"
 	audio "github.com/richinsley/goshadertoy/audio"
+	options "github.com/richinsley/goshadertoy/options"
 )
 
 const (
@@ -34,24 +35,28 @@ type MicChannel struct {
 }
 
 // NewMicChannel creates a channel that gets data from the default microphone using portaudio.
-func NewMicChannel() (*MicChannel, error) {
-	mic, err := audio.NewMicrophone(44100)
+func NewMicChannel(options *options.ShaderOptions) (*MicChannel, error) {
+	mic, err := audio.NewFFmpegAudioDevice(options)
 	if err != nil {
 		log.Printf("Could not initialize microphone: %v. Using silent fallback.", err)
-		return NewMicChannelWithDevice(audio.NewNullDevice(44100))
+		return NewMicChannelWithDevice(audio.NewNullDevice(44100), options)
 	}
 	log.Println("Initialized MicChannel with default PortAudio microphone.")
-	return NewMicChannelWithDevice(mic)
+	return NewMicChannelWithDevice(mic, options)
 }
 
 // NewMicChannelWithFFmpeg creates a channel that gets data from an FFmpeg process.
-func NewMicChannelWithFFmpeg(inputFile, ffmpegPath string) (*MicChannel, error) {
-	device := audio.NewFFmpegAudioDevice(inputFile, ffmpegPath)
-	log.Printf("Initialized MicChannel with FFmpeg input: %s", inputFile)
-	return NewMicChannelWithDevice(device)
+func NewMicChannelWithFFmpeg(options *options.ShaderOptions) (*MicChannel, error) {
+	device, err := audio.NewFFmpegAudioDevice(options)
+	if err != nil {
+		log.Printf("Could not initialize FFmpeg audio device: %v. Using silent fallback.", err)
+		return NewMicChannelWithDevice(audio.NewNullDevice(44100), options)
+	}
+	// device.Start()
+	return NewMicChannelWithDevice(device, options)
 }
 
-func NewMicChannelWithDevice(device audio.AudioDevice) (*MicChannel, error) {
+func NewMicChannelWithDevice(device audio.AudioDevice, options *options.ShaderOptions) (*MicChannel, error) {
 	var textureID uint32
 	gl.GenTextures(1, &textureID)
 	gl.BindTexture(gl.TEXTURE_2D, textureID)

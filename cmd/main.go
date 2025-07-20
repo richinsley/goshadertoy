@@ -84,8 +84,8 @@ func main() {
 	options.NumPBOs = flag.Int("numpbos", 2, "Number of PBOs to use for streaming")
 	options.Prewarm = flag.Bool("prewarm", false, "Prewarm the renderer before recording/streaming (optional)")
 
-	options.AudioInput = flag.String("audio-input", "", "FFmpeg audio input string (e.g., a file path or 'avfoundation:default'). Overrides default mic.")
-
+	options.AudioInputDevice = flag.String("audio-input-device", "", "FFmpeg audio input device string (e.g., a file path or 'avfoundation:default'). Overrides default mic.")
+	options.AudioInputFile = flag.String("audio-input-file", "", "FFmpeg audio input file (e.g., a WAV or MP3 file). Overrides default mic.")
 	flag.Parse()
 
 	if *options.Help {
