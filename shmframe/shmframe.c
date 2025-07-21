@@ -8,6 +8,7 @@
 #include "protocol.h"
 
 #include "libavutil/avstring.h"
+#include "libavutil/channel_layout.h"
 #include "libavutil/imgutils.h"
 #include "libavutil/pixdesc.h"
 #include "libavformat/avformat.h"
@@ -16,7 +17,7 @@
 #include "libavcodec/avcodec.h"
 
 typedef struct {
-    uint8_t *shm_buffer; // Pointer to the start of the shared memory region
+    uint8_t *shm_buffer;
     int shm_buffer_size;
     int shm_fd;
     sem_t *empty_sem;
@@ -33,9 +34,6 @@ static int shm_read_header(AVFormatContext *s) {
         av_log(s, AV_LOG_ERROR, "Failed to read initial SHMHeader from pipe.\n");
         return AVERROR(EIO);
     }
-
-    av_log(s, AV_LOG_INFO, "shm demuxer: Read header from pipe: shm_file='%s', bit_depth=%u, width=%u, height=%u\n",
-           header.shm_file, header.bit_depth, header.width, header.height);
 
     c->shm_fd = shm_open(header.shm_file, O_RDONLY, 0);
     if (c->shm_fd < 0) {
@@ -60,16 +58,16 @@ static int shm_read_header(AVFormatContext *s) {
 
     struct stat st_shm;
     if (fstat(c->shm_fd, &st_shm) < 0) {
-        close(c->shm_fd);
         av_log(s, AV_LOG_ERROR, "fstat on shared memory failed: %s\n", strerror(errno));
+        close(c->shm_fd);
         return AVERROR(errno);
     }
     c->shm_buffer_size = st_shm.st_size;
 
     c->shm_buffer = mmap(NULL, c->shm_buffer_size, PROT_READ, MAP_SHARED, c->shm_fd, 0);
     if (c->shm_buffer == MAP_FAILED) {
-        close(c->shm_fd);
         av_log(s, AV_LOG_ERROR, "mmap failed: %s\n", strerror(errno));
+        close(c->shm_fd);
         return AVERROR(errno);
     }
 
@@ -82,9 +80,14 @@ static int shm_read_header(AVFormatContext *s) {
         return AVERROR(ENOMEM);
     }
 
-    // Configure the stream based on the header from the pipe
-    if (header.frametype == 0) { // Video stream
-        av_log(s, AV_LOG_INFO, "shm demuxer: Configuring for video stream.\n");
+    if (header.frametype == 1) { // Audio
+        st->codecpar->codec_type = AVMEDIA_TYPE_AUDIO;
+        st->codecpar->codec_id = AV_CODEC_ID_PCM_F32LE;
+        st->codecpar->format = AV_SAMPLE_FMT_FLT;
+        st->codecpar->sample_rate = header.sample_rate;
+        av_channel_layout_default(&st->codecpar->ch_layout, header.channels);
+        st->time_base = (AVRational){1, st->codecpar->sample_rate};
+    } else { // Video
         st->time_base = av_inv_q(av_d2q(header.frame_rate, 1000000));
         st->r_frame_rate = av_d2q(header.frame_rate, 1000000);
         st->avg_frame_rate = st->r_frame_rate;
@@ -93,12 +96,8 @@ static int shm_read_header(AVFormatContext *s) {
         st->codecpar->width = header.width;
         st->codecpar->height = header.height;
         st->codecpar->format = header.pix_fmt;
-    } else { // Audio stream (unchanged)
-        // ... audio configuration logic ...
     }
 
-    
-    av_log(s, AV_LOG_INFO, "shm demuxer header read successfully.\n");
     return 0;
 }
 
@@ -117,12 +116,10 @@ static int shm_read_packet(AVFormatContext *s, AVPacket *pkt) {
     }
 
     if (sem_wait(c->full_sem) < 0) {
-        av_log(s, AV_LOG_ERROR, "sem_wait(full_sem) failed: %s\n", strerror(errno));
         return AVERROR(errno);
     }
 
     if (frame_header.offset + frame_header.size > c->shm_buffer_size) {
-        av_log(s, AV_LOG_ERROR, "Frame offset+size (%llu) exceeds shared memory size (%d).\n", (unsigned long long)frame_header.offset + frame_header.size, c->shm_buffer_size);
         sem_post(c->empty_sem);
         return AVERROR(EINVAL);
     }
@@ -137,13 +134,14 @@ static int shm_read_packet(AVFormatContext *s, AVPacket *pkt) {
     pkt->pts = frame_header.pts;
     pkt->dts = pkt->pts;
     pkt->stream_index = 0;
-    pkt->flags |= AV_PKT_FLAG_KEY;
 
     if (sem_post(c->empty_sem) < 0) {
+        // This is tricky, the packet is already read. We can't easily undo.
+        // For now, log the error and continue. The producer might get stuck.
         av_log(s, AV_LOG_ERROR, "sem_post(empty_sem) failed: %s\n", strerror(errno));
     }
 
-    return frame_header.size;
+    return 0; // Return 0 on success
 }
 
 static int shm_read_close(AVFormatContext *s) {

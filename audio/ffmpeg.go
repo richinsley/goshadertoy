@@ -103,7 +103,6 @@ func (d *FFmpegAudioDevice) Start() (<-chan []float32, error) {
 
 	log.Printf("Starting FFmpeg audio capture for input: %s", d.inputFile)
 
-	// The asetnsamples filter is no longer needed as the muxer handles framing.
 	ffmpegNode := ffmpeg.Input(inputdev, inputArgs)
 	ffmpegCmd := ffmpegNode.Output("pipe:", outputArgs).
 		WithOutput(pipeWriter).ErrorToStdOut()
@@ -122,19 +121,27 @@ func (d *FFmpegAudioDevice) Start() (<-chan []float32, error) {
 		pipeWriter.Close()
 	}()
 
-	// If a player exists, start it and route audio to both channels.
-	// Otherwise, just route to the main audio channel.
 	if d.player != nil {
+		// 1. Create a channel for the player.
 		playerChan := make(chan []float32, 16)
 		d.player.Start(playerChan)
 
-		// This goroutine fans out the audio stream
+		// 2. Create a single channel for the main audio producer loop.
+		producerChan := make(chan []float32, 16)
+
+		// 3. Use Tee to fan-out the audio from the producer to both consumers.
+		//    Tee is in the same 'audio' package and is directly available.
+		go Tee(producerChan, d.audioChan, playerChan)
+
+		// 4. Start the main audio loop, which now only produces to a single channel.
+		//    When it finishes, it closes producerChan, which in turn closes the consumer channels.
 		go func() {
-			defer close(d.audioChan)
-			defer close(playerChan)
-			d.runAudioLoop(d.audioChan, playerChan)
+			defer close(producerChan)
+			d.runAudioLoop(producerChan) // runAudioLoop now only writes to one channel.
 		}()
+
 	} else {
+		// when there is no player.
 		go func() {
 			defer close(d.audioChan)
 			d.runAudioLoop(d.audioChan)
