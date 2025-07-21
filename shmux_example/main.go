@@ -3,7 +3,7 @@ package main
 import (
 	"io"
 	"log"
-	"runtime"
+	"os"
 	"strings"
 	"unsafe"
 
@@ -19,7 +19,6 @@ import (
 import "C"
 
 const (
-	// IMPORTANT: Replace with the actual path to your custom ffmpeg build
 	ffmpegArcanaPath = "./release/bin/ffmpeg_arcana"
 
 	// IMPORTANT: This is platform-specific.
@@ -36,38 +35,38 @@ func main() {
 	log.Println("Starting SHM Audio Device Capture Demo...")
 
 	// --- FFmpeg Command Configuration for Live Device ---
-	var inputFormat string
-	switch runtime.GOOS {
-	case "darwin":
-		inputFormat = "avfoundation"
-	case "linux":
-		inputFormat = "pulse" // or "alsa"
-	case "windows":
-		inputFormat = "dshow"
-	default:
-		log.Fatalf("Unsupported OS for live audio capture: %s", runtime.GOOS)
-	}
+	// var inputFormat string
+	// switch runtime.GOOS {
+	// case "darwin":
+	// 	inputFormat = "avfoundation"
+	// case "linux":
+	// 	inputFormat = "pulse" // or "alsa"
+	// case "windows":
+	// 	inputFormat = "dshow"
+	// default:
+	// 	log.Fatalf("Unsupported OS for live audio capture: %s", runtime.GOOS)
+	// }
 
 	// Create an in-memory pipe.
 	pipeReader, pipeWriter := io.Pipe()
 
 	// Configure the ffmpeg command chain.
-	// The key is to force the input device to produce fixed-size frames using a filter.
-	ffmpegNode := ffmpeg.Input(audioDeviceName, ffmpeg.KwArgs{
-		"f": inputFormat,
-	}).Filter("asetnsamples", ffmpeg.Args{"1024"}) // Force 1024 sample frames to prevent buffering deadlock
+	// The new shm_muxer internally buffers to create fixed-size frames, so the `asetnsamples` filter is no longer needed.
+	ffmpegNode := ffmpeg.Input("/Users/richardinsley/smoothcriminal.m4a")
 
 	ffmpegCmd := ffmpegNode.Output("pipe:", ffmpeg.KwArgs{
-		"f":   "shm_muxer",
-		"c:a": "pcm_f32le", // Decode to 32-bit float audio
-		"ac":  "1",         // Force mono for consistency
-		"ar":  "44100",     // Force sample rate for consistency
+		"f":                  "shm_muxer",
+		"samples_per_buffer": "1024", // Match the muxer's default
+		"c:a":                "pcm_f32le",
+		"ac":                 "1",
+		"ar":                 "44100",
+		"flush_packets":      "1",
 	}).
 		WithOutput(pipeWriter).
 		SetFfmpegPath(ffmpegArcanaPath).
 		ErrorToStdOut()
 
-	log.Printf("Executing FFmpeg command to capture from device '%s' with format '%s'...", audioDeviceName, inputFormat)
+	log.Printf("Executing FFmpeg command to capture from file...")
 
 	// Run the ffmpeg command in a separate goroutine.
 	go func() {
@@ -75,8 +74,6 @@ func main() {
 		if err != nil {
 			log.Printf("FFmpeg command finished with error: %v", err)
 		}
-		// When FFmpeg is done (or fails), close the writer. This will unblock
-		// the reader in the main goroutine and signal that there's no more data.
 		pipeWriter.Close()
 	}()
 
@@ -87,12 +84,10 @@ func main() {
 	headerSize := int(unsafe.Sizeof(shmHeader))
 	headerBuf := make([]byte, headerSize)
 
-	// This will block until FFmpeg writes the header.
 	if _, err := io.ReadFull(pipeReader, headerBuf); err != nil {
 		log.Fatalf("Failed to read SHMHeader from pipe: %v", err)
 	}
 
-	// Directly cast the byte buffer to the C struct pointer
 	shmHeader = *(*C.SHMHeader)(unsafe.Pointer(&headerBuf[0]))
 
 	// --- Extract info and open Semaphores and Shared Memory ---
@@ -119,13 +114,12 @@ func main() {
 	}
 	defer fullSem.Close()
 
-	// Calculate SHM size based on producer's logic from shm_muxer.c
-	frameSize := int(shmHeader.sample_rate*shmHeader.channels*(shmHeader.bit_depth/8)) * 2
-	if frameSize < 4096 {
-		frameSize = 4096
-	}
-	// numBuffers is 3 in the C code
-	shmSize := int(unsafe.Sizeof(C.SHMControlBlock{})) + (frameSize * 3)
+	// --- Calculate SHM size ---
+	const samplesPerBuffer = 1024 // This must match the `-samples_per_buffer` FFmpeg option.
+	const numBuffers = 3          // This must match NUM_BUFFERS in the C code.
+	bytesPerSample := int(shmHeader.bit_depth / 8)
+	frameSize := samplesPerBuffer * int(shmHeader.channels) * bytesPerSample
+	shmSize := int(unsafe.Sizeof(C.SHMControlBlock{})) + (frameSize * numBuffers)
 
 	shm, err := sharedmemory.OpenSharedMemory(shmNameForGo, shmSize)
 	if err != nil {
@@ -141,8 +135,10 @@ func main() {
 	frameCounter := 0
 
 	log.Println("Starting to read audio frames from pipe...")
+	f := "./ffmpeg_audio_output.raw"
+	file, _ := os.Create(f)
+	defer file.Close()
 	for {
-		// Read the next frame header from the pipe
 		_, err := io.ReadFull(pipeReader, frameHeaderBuf)
 		if err != nil {
 			if err == io.EOF {
@@ -160,12 +156,11 @@ func main() {
 		}
 
 		if frameHeader.cmdtype == 0 { // Audio Data
-			// 1. Wait for the producer to signal that a frame is ready
 			if err := fullSem.Acquire(); err != nil {
 				log.Fatalf("Error acquiring full semaphore: %v", err)
 			}
 
-			// 2. Read the data from shared memory using the correct offset
+			// The size in the frame header is now guaranteed to be the fixed frameSize.
 			audioData := make([]byte, frameHeader.size)
 			_, readErr := shm.ReadAt(audioData, int64(frameHeader.offset))
 			if readErr != nil {
@@ -174,7 +169,12 @@ func main() {
 				log.Printf("Frame %d (PTS %d): Read %d bytes of audio data from offset %d.", frameCounter, frameHeader.pts, len(audioData), frameHeader.offset)
 			}
 
-			// 3. Signal to the producer that we are done and the buffer is free
+			if file != nil {
+				if _, err := file.Write(audioData); err != nil {
+					log.Printf("Failed to write to output file %s: %v", f, err)
+				}
+			}
+
 			if err := emptySem.Release(); err != nil {
 				log.Fatalf("Error releasing empty semaphore: %v", err)
 			}

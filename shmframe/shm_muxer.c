@@ -11,6 +11,7 @@
 
 #include "libavutil/avstring.h"
 #include "libavutil/imgutils.h"
+#include "libavutil/mem.h"
 #include "libavutil/pixdesc.h"
 #include "libavutil/opt.h"
 #include "libavformat/avformat.h"
@@ -23,6 +24,8 @@
 
 // Context for the SHM muxer
 typedef struct {
+    const AVClass *class;
+    // SHM and Semaphore resources
     uint8_t *buffer;
     int buffer_size;
     int shm_fd;
@@ -33,53 +36,103 @@ typedef struct {
     sem_t *full_sem;
     SHMControlBlock *control_block;
     uint8_t *frame_buffers[NUM_BUFFERS];
-    uint32_t write_index; // Local write index for the producer
+    uint32_t write_index;
+
+    // Muxer options
+    int samples_per_buffer;
+
+    // Internal buffering state
+    uint8_t *internal_buffer;
+    int internal_buffer_size;
+    int internal_buffer_occupancy;
+    size_t frame_buffer_size;
+    int64_t pts_counter;
+
 } SHMMuxerContext;
+
+// Helper function to write one full, buffered frame to shared memory
+static int write_full_frame(AVFormatContext *s) {
+    SHMMuxerContext *c = s->priv_data;
+
+    if (sem_wait(c->empty_sem) < 0) {
+        av_log(s, AV_LOG_ERROR, "sem_wait(empty_sem) failed: %s\n", strerror(errno));
+        return AVERROR(errno);
+    }
+
+    uint8_t *write_buffer = c->frame_buffers[c->write_index];
+    uint64_t offset = write_buffer - c->buffer;
+
+    // Copy one full frame from our internal buffer to the shared memory slot
+    memcpy(write_buffer, c->internal_buffer, c->frame_buffer_size);
+
+    FrameHeader frame_header = {0};
+    frame_header.cmdtype = 0;
+    frame_header.size = c->frame_buffer_size;
+    frame_header.pts = c->pts_counter++;
+    frame_header.offset = offset;
+
+    avio_write(s->pb, (uint8_t*)&frame_header, sizeof(frame_header));
+    avio_flush(s->pb);
+
+    c->write_index = (c->write_index + 1) % NUM_BUFFERS;
+
+    if (sem_post(c->full_sem) < 0) {
+        av_log(s, AV_LOG_ERROR, "sem_post(full_sem) failed: %s\n", strerror(errno));
+    }
+
+    // Shift the remaining data in the internal buffer to the beginning
+    c->internal_buffer_occupancy -= c->frame_buffer_size;
+    if (c->internal_buffer_occupancy > 0) {
+        memmove(c->internal_buffer, c->internal_buffer + c->frame_buffer_size, c->internal_buffer_occupancy);
+    }
+
+    return 0;
+}
+
 
 // write_header: Called when FFmpeg starts writing the output
 static int shm_write_header(AVFormatContext *s) {
     SHMMuxerContext *c = s->priv_data;
     AVStream *st;
-    SHMHeader header = {0};
-
-    if (!s->pb) {
-        av_log(s, AV_LOG_ERROR, "AVIOContext is NULL.\n");
-        return AVERROR(EIO);
-    }
-    
     if (s->nb_streams == 0) {
         av_log(s, AV_LOG_ERROR, "No streams were mapped to the SHM muxer.\n");
         return AVERROR(EINVAL);
     }
-    
     st = s->streams[0];
-    
+    SHMHeader header = {0};
+    int bytes_per_sample;
+    size_t required_shm_size;
+
+    c->pts_counter = 0;
+
     pid_t pid = getpid();
     snprintf(c->shm_name, sizeof(c->shm_name), "/goshadertoy_audio_%d", pid);
     snprintf(c->empty_sem_name, sizeof(c->empty_sem_name), "goshadertoy_audio_empty_%d", pid);
     snprintf(c->full_sem_name, sizeof(c->full_sem_name), "goshadertoy_audio_full_%d", pid);
 
-    // Populate SHMHeader based on the stream FFmpeg has provided
     if (st->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
         header.frametype = 1;
         header.sample_rate = st->codecpar->sample_rate;
         header.channels = st->codecpar->ch_layout.nb_channels;
-        header.pix_fmt = st->codecpar->format;
-
-        switch (st->codecpar->format) {
-            case AV_SAMPLE_FMT_FLT: case AV_SAMPLE_FMT_FLTP: header.bit_depth = 32; break;
-            case AV_SAMPLE_FMT_S16: case AV_SAMPLE_FMT_S16P: header.bit_depth = 16; break;
-            case AV_SAMPLE_FMT_U8:  case AV_SAMPLE_FMT_U8P:  header.bit_depth = 8;  break;
-            default:
-                av_log(s, AV_LOG_ERROR, "Unsupported audio sample format for SHM: %s\n", av_get_sample_fmt_name(st->codecpar->format));
-                return AVERROR(EINVAL);
-        }
-    } else if (st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
-        header.frametype = 0;
+        header.pix_fmt = st->codecpar->format; // This is actually sample format
+        bytes_per_sample = av_get_bytes_per_sample(st->codecpar->format);
+        header.bit_depth = bytes_per_sample * 8;
     } else {
-        av_log(s, AV_LOG_ERROR, "Unsupported stream type provided to SHM muxer.\n");
+        av_log(s, AV_LOG_ERROR, "SHM muxer only supports audio streams.\n");
         return AVERROR(EINVAL);
     }
+
+    c->frame_buffer_size = c->samples_per_buffer * header.channels * bytes_per_sample;
+
+    // Allocate internal buffer to accumulate data. Make it twice the size of a frame
+    // to handle incoming packets larger than one frame.
+    c->internal_buffer_size = c->frame_buffer_size * 2;
+    c->internal_buffer = av_malloc(c->internal_buffer_size);
+    if (!c->internal_buffer) {
+        return AVERROR(ENOMEM);
+    }
+    c->internal_buffer_occupancy = 0;
+
 
     av_strlcpy(header.shm_file, c->shm_name, sizeof(header.shm_file));
     av_strlcpy(header.empty_sem_name, c->empty_sem_name, sizeof(header.empty_sem_name));
@@ -89,10 +142,7 @@ static int shm_write_header(AVFormatContext *s) {
     avio_write(s->pb, (uint8_t*)&header, sizeof(header));
     avio_flush(s->pb);
 
-    size_t frame_size = (size_t)header.sample_rate * header.channels * (header.bit_depth / 8) * 2;
-    if (frame_size < 4096) frame_size = 4096;
-
-    size_t required_shm_size = sizeof(SHMControlBlock) + (frame_size * NUM_BUFFERS);
+    required_shm_size = sizeof(SHMControlBlock) + (c->frame_buffer_size * NUM_BUFFERS);
 
     c->shm_fd = shm_open(c->shm_name, O_RDWR | O_CREAT, 0666);
     if (c->shm_fd < 0) {
@@ -103,12 +153,18 @@ static int shm_write_header(AVFormatContext *s) {
     c->empty_sem = sem_open(c->empty_sem_name, O_CREAT, 0666, NUM_BUFFERS);
     if (c->empty_sem == SEM_FAILED) {
         av_log(s, AV_LOG_ERROR, "Failed to create empty semaphore '%s': %s\n", c->empty_sem_name, strerror(errno));
+        close(c->shm_fd);
+        shm_unlink(c->shm_name);
         return AVERROR(errno);
     }
 
     c->full_sem = sem_open(c->full_sem_name, O_CREAT, 0666, 0);
     if (c->full_sem == SEM_FAILED) {
         av_log(s, AV_LOG_ERROR, "Failed to create full semaphore '%s': %s\n", c->full_sem_name, strerror(errno));
+        close(c->shm_fd);
+        shm_unlink(c->shm_name);
+        sem_close(c->empty_sem);
+        sem_unlink(c->empty_sem_name);
         return AVERROR(errno);
     }
 
@@ -129,14 +185,13 @@ static int shm_write_header(AVFormatContext *s) {
     c->control_block = (SHMControlBlock*)c->buffer;
     c->control_block->num_buffers = NUM_BUFFERS;
     c->control_block->eof = 0;
-    c->write_index = 0; // Initialize local write index
+    c->write_index = 0;
 
     for(int i=0; i < NUM_BUFFERS; i++) {
-        c->frame_buffers[i] = c->buffer + sizeof(SHMControlBlock) + (i * frame_size);
+        c->frame_buffers[i] = c->buffer + sizeof(SHMControlBlock) + (i * c->frame_buffer_size);
     }
 
-
-    av_log(s, AV_LOG_INFO, "SHM muxer header written. SHM '%s' created (size %d).\n", c->shm_name, c->buffer_size);
+    av_log(s, AV_LOG_INFO, "SHM muxer header written. SHM '%s' created (size %d), frame buffer size %zu.\n", c->shm_name, c->buffer_size, c->frame_buffer_size);
 
     return 0;
 }
@@ -145,38 +200,43 @@ static int shm_write_header(AVFormatContext *s) {
 static int shm_write_packet(AVFormatContext *s, AVPacket *pkt) {
     SHMMuxerContext *c = s->priv_data;
 
-    if (sem_wait(c->empty_sem) < 0) {
-        av_log(s, AV_LOG_ERROR, "sem_wait(empty_sem) failed: %s\n", strerror(errno));
-        return AVERROR(errno);
+    if (c->internal_buffer_occupancy + pkt->size > c->internal_buffer_size) {
+        av_log(s, AV_LOG_ERROR, "Internal muxer buffer overflow! Dropping data.\n");
+        return 0;
     }
-    uint8_t *write_buffer = c->frame_buffers[c->write_index];
 
-    FrameHeader frame_header = {0};
-    memcpy(write_buffer, pkt->data, pkt->size);
-    frame_header.cmdtype = 0;
-    frame_header.size = pkt->size;
-    frame_header.pts = pkt->pts;
-    avio_write(s->pb, (uint8_t*)&frame_header, sizeof(frame_header));
-    avio_flush(s->pb);
-    
-    // Update the local write index
-    c->write_index = (c->write_index + 1) % c->control_block->num_buffers;
+    memcpy(c->internal_buffer + c->internal_buffer_occupancy, pkt->data, pkt->size);
+    c->internal_buffer_occupancy += pkt->size;
 
-    if (sem_post(c->full_sem) < 0) {
-        av_log(s, AV_LOG_ERROR, "sem_post(full_sem) failed: %s\n", strerror(errno));
-        return AVERROR(errno);
+    while (c->internal_buffer_occupancy >= c->frame_buffer_size) {
+        int ret = write_full_frame(s);
+        if (ret < 0) {
+            return ret;
+        }
     }
-    return pkt->size;
+
+    return 0;
 }
 
 static int shm_write_trailer(AVFormatContext *s) {
     SHMMuxerContext *c = s->priv_data;
     
+    // Flush any remaining data in the internal buffer by padding it with silence
+    if (c->internal_buffer_occupancy > 0) {
+        int padding_size = c->frame_buffer_size - c->internal_buffer_occupancy;
+        memset(c->internal_buffer + c->internal_buffer_occupancy, 0, padding_size);
+        c->internal_buffer_occupancy += padding_size;
+        write_full_frame(s);
+    }
+
     c->control_block->eof = 1;
 
     FrameHeader eof_header = { .cmdtype = 2 };
     avio_write(s->pb, (uint8_t*)&eof_header, sizeof(eof_header));
     avio_flush(s->pb);
+    
+    // Cleanup
+    av_free(c->internal_buffer);
     munmap(c->buffer, c->buffer_size);
     close(c->shm_fd);
     shm_unlink(c->shm_name);
@@ -192,8 +252,11 @@ static int shm_write_trailer(AVFormatContext *s) {
     return 0;
 }
 
-
-static const AVOption shm_muxer_options[] = { {NULL} };
+#define OFFSET(x) offsetof(SHMMuxerContext, x)
+static const AVOption shm_muxer_options[] = {
+    { "samples_per_buffer", "Number of audio samples per shared memory buffer", OFFSET(samples_per_buffer), AV_OPT_TYPE_INT, { .i64 = 1024 }, 256, 16384, AV_OPT_FLAG_ENCODING_PARAM },
+    { NULL }
+};
 
 static const AVClass shm_muxer_class = {
     .class_name = "shm_muxer",
@@ -208,7 +271,7 @@ const FFOutputFormat ff_shm_muxer = {
         .long_name      = "Shared Memory Muxer",
         .priv_class     = &shm_muxer_class,
         .audio_codec    = AV_CODEC_ID_PCM_F32LE,
-        .video_codec    = AV_CODEC_ID_RAWVIDEO,
+        .video_codec    = AV_CODEC_ID_NONE,
     },
     .priv_data_size = sizeof(SHMMuxerContext),
     .write_header   = shm_write_header,

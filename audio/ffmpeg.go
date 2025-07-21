@@ -37,6 +37,7 @@ type FFmpegAudioDevice struct {
 	sampleRate  int
 	isStreaming bool
 	options     *options.ShaderOptions
+	player      *AudioPlayer
 }
 
 // NewFFmpegAudioDevice creates a new audio device that sources its audio from an FFmpeg process.
@@ -54,6 +55,16 @@ func NewFFmpegAudioDevice(options *options.ShaderOptions) (*FFmpegAudioDevice, e
 		log.Println("No audio input device or file specified.")
 		return nil, fmt.Errorf("no audio input device or file specified")
 	}
+
+	// If an output device is specified, create a player instance.
+	if *options.AudioOutputDevice != "" {
+		player, err := NewAudioPlayer(options)
+		if err != nil {
+			return nil, err
+		}
+		retv.player = player
+	}
+
 	return retv, nil
 }
 
@@ -62,23 +73,22 @@ func (d *FFmpegAudioDevice) getArgs() (inputdev string, inputArgs ffmpeg.KwArgs,
 	if *d.options.AudioInputDevice != "" {
 		inputdev = *d.options.AudioInputDevice
 		inputArgs["f"] = "avfoundation" // Default for macOS
-		// This flag can help reduce latency
 		inputArgs["fflags"] = "nobuffer"
 
 	} else if *d.options.AudioInputFile != "" {
 		inputdev = *d.options.AudioInputFile
-		// rate emulation for stream and live modes
 		if *d.options.Mode == "stream" || *d.options.Mode == "live" {
-			inputArgs["re"] = "" // Read input in real-time for streaming
+			inputArgs["re"] = ""
 		}
 	}
 
 	outputArgs = ffmpeg.KwArgs{
-		"f":             "shm_muxer",
-		"c:a":           "pcm_f32le",
-		"ar":            "44100", // Set a consistent sample rate
-		"ac":            "1",     // Set a consistent channel layout
-		"flush_packets": "1",     // Force flush packets to the output pipe
+		"f":                  "shm_muxer",
+		"samples_per_buffer": "1024", // This must match the logic in the client
+		"c:a":                "pcm_f32le",
+		"ar":                 "44100",
+		"ac":                 "1",
+		"flush_packets":      "1",
 	}
 
 	return inputdev, inputArgs, outputArgs
@@ -86,19 +96,15 @@ func (d *FFmpegAudioDevice) getArgs() (inputdev string, inputArgs ffmpeg.KwArgs,
 
 func (d *FFmpegAudioDevice) Start() (<-chan []float32, error) {
 	inputdev, inputArgs, outputArgs := d.getArgs()
-	d.audioChan = make(chan []float32, 16) // Buffered channel
+	d.audioChan = make(chan []float32, 16)
 
 	pipeReader, pipeWriter := io.Pipe()
 	d.pipeReader = pipeReader
 
 	log.Printf("Starting FFmpeg audio capture for input: %s", d.inputFile)
 
-	// Build the FFmpeg command chain
+	// The asetnsamples filter is no longer needed as the muxer handles framing.
 	ffmpegNode := ffmpeg.Input(inputdev, inputArgs)
-
-	// force ffmpeg to process audio in 1024-sample chunks.
-	ffmpegNode = ffmpegNode.Filter("asetnsamples", ffmpeg.Args{"1024"})
-
 	ffmpegCmd := ffmpegNode.Output("pipe:", outputArgs).
 		WithOutput(pipeWriter).ErrorToStdOut()
 
@@ -108,25 +114,40 @@ func (d *FFmpegAudioDevice) Start() (<-chan []float32, error) {
 
 	d.cmd = ffmpegCmd.Compile()
 
-	// Now, run the command object we just created and stored.
 	go func() {
 		err := d.cmd.Run()
 		if err != nil && !strings.Contains(err.Error(), "signal: killed") {
-
 			log.Printf("FFmpeg command finished with error: %v", err)
 		}
-		// When FFmpeg is done (or fails), close the writer. This will unblock
-		// the reader in the main goroutine and signal that there's no more data.
 		pipeWriter.Close()
 	}()
 
-	go d.runAudioLoop()
+	// If a player exists, start it and route audio to both channels.
+	// Otherwise, just route to the main audio channel.
+	if d.player != nil {
+		playerChan := make(chan []float32, 16)
+		d.player.Start(playerChan)
+
+		// This goroutine fans out the audio stream
+		go func() {
+			defer close(d.audioChan)
+			defer close(playerChan)
+			d.runAudioLoop(d.audioChan, playerChan)
+		}()
+	} else {
+		go func() {
+			defer close(d.audioChan)
+			d.runAudioLoop(d.audioChan)
+		}()
+	}
 
 	d.isStreaming = true
 	return d.audioChan, nil
 }
 
-func (d *FFmpegAudioDevice) runAudioLoop() {
+// runAudioLoop now accepts one or more channels to write to.
+func (d *FFmpegAudioDevice) runAudioLoop(outputs ...chan<- []float32) {
+
 	defer func() {
 		if d.shm != nil {
 			d.shm.Close()
@@ -137,7 +158,6 @@ func (d *FFmpegAudioDevice) runAudioLoop() {
 		if d.fullSem != nil {
 			d.fullSem.Close()
 		}
-		close(d.audioChan)
 		log.Println("FFmpeg audio loop finished.")
 	}()
 
@@ -145,15 +165,12 @@ func (d *FFmpegAudioDevice) runAudioLoop() {
 	headerSize := int(unsafe.Sizeof(shmHeader))
 	headerBuf := make([]byte, headerSize)
 
-	// Read the SHMHeader from FFmpeg's output pipe
 	if _, err := io.ReadFull(d.pipeReader, headerBuf); err != nil {
 		log.Printf("Failed to read SHMHeader from FFmpeg pipe: %v", err)
 		return
 	}
 
-	// Directly cast the byte buffer to the C struct pointer
 	shmHeader = *(*C.SHMHeader)(unsafe.Pointer(&headerBuf[0]))
-
 	d.sampleRate = int(shmHeader.sample_rate)
 	log.Printf("Received SHMHeader from FFmpeg: SampleRate=%d, Channels=%d", d.sampleRate, shmHeader.channels)
 
@@ -174,13 +191,13 @@ func (d *FFmpegAudioDevice) runAudioLoop() {
 		return
 	}
 
-	// Calculate SHM size based on producer's logic
-	frameSize := int(shmHeader.sample_rate*shmHeader.channels*(shmHeader.bit_depth/8)) * 2
-	if frameSize < 4096 {
-		frameSize = 4096
-	}
-	// numBuffers is 3 in the C code
-	shmSize := int(unsafe.Sizeof(C.SHMControlBlock{})) + (frameSize * 3)
+	// --- SHM Size Calculation ---
+	// This logic must exactly match the client (shmux_example) and the producer (shm_muxer.c).
+	const samplesPerBuffer = 1024
+	const numBuffers = 3
+	bytesPerSample := int(shmHeader.bit_depth / 8)
+	frameSize := samplesPerBuffer * int(shmHeader.channels) * bytesPerSample
+	shmSize := int(unsafe.Sizeof(C.SHMControlBlock{})) + (frameSize * numBuffers)
 
 	d.shm, err = sharedmemory.OpenSharedMemory(shmNameForGo, shmSize)
 	if err != nil {
@@ -195,45 +212,41 @@ func (d *FFmpegAudioDevice) runAudioLoop() {
 	for {
 		select {
 		case <-d.stopChan:
-			log.Println("Stop signal received, exiting audio loop.")
 			return
 		default:
 			_, err := io.ReadFull(d.pipeReader, frameHeaderBuf)
 			if err != nil {
-				if err == io.EOF || err == io.ErrClosedPipe {
-					log.Println("FFmpeg pipe closed. Stopping audio loop gracefully.")
-				} else {
-					log.Printf("Error reading FrameHeader from pipe: %v", err)
-				}
 				return
 			}
 
 			frameHeader = *(*C.FrameHeader)(unsafe.Pointer(&frameHeaderBuf[0]))
 
 			if frameHeader.cmdtype == 2 { // EOF
-				log.Println("Received EOF command from FFmpeg.")
 				return
 			}
 
 			if frameHeader.cmdtype == 0 { // Audio Data
 				if err := d.fullSem.Acquire(); err != nil {
-					log.Printf("Error acquiring full semaphore: %v", err)
 					return
 				}
 
 				audioData := make([]byte, frameHeader.size)
 				n, err := d.shm.ReadAt(audioData, int64(frameHeader.offset))
 				if err != nil || n != int(frameHeader.size) {
-					log.Printf("Error reading audio data from shared memory: %v", err)
+					// handle error
 				} else {
 					floatData := make([]float32, len(audioData)/4)
 					reader := bytes.NewReader(audioData)
 					binary.Read(reader, binary.LittleEndian, &floatData)
-					d.audioChan <- floatData
+
+					// Fan out to all output channels
+					for _, out := range outputs {
+						out <- floatData
+					}
 				}
 
 				if err := d.emptySem.Release(); err != nil {
-					log.Printf("Error releasing empty semaphore: %v", err)
+					return
 				}
 			}
 		}
@@ -247,8 +260,11 @@ func (d *FFmpegAudioDevice) Stop() error {
 	d.isStreaming = false
 	close(d.stopChan)
 
+	if d.player != nil {
+		d.player.Stop()
+	}
+
 	if d.cmd != nil && d.cmd.Process != nil {
-		// Send SIGINT to FFmpeg for a graceful shutdown
 		if err := d.cmd.Process.Signal(syscall.SIGINT); err != nil {
 			log.Printf("Failed to send SIGINT to FFmpeg, killing process: %v", err)
 			d.cmd.Process.Kill()

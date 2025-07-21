@@ -86,6 +86,8 @@ func main() {
 
 	options.AudioInputDevice = flag.String("audio-input-device", "", "FFmpeg audio input device string (e.g., a file path or 'avfoundation:default'). Overrides default mic.")
 	options.AudioInputFile = flag.String("audio-input-file", "", "FFmpeg audio input file (e.g., a WAV or MP3 file). Overrides default mic.")
+	options.AudioOutputDevice = flag.String("audio-output-device", "", "FFmpeg audio output device string.")
+
 	flag.Parse()
 
 	if *options.Help {
