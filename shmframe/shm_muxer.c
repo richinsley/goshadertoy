@@ -68,7 +68,11 @@ static int write_full_frame(AVFormatContext *s) {
     FrameHeader frame_header = {0};
     frame_header.cmdtype = 0;
     frame_header.size = c->frame_buffer_size;
-    frame_header.pts = c->pts_counter++;
+    
+    // Use the pts_counter and increment it by the number of samples per frame.
+    frame_header.pts = c->pts_counter;
+    c->pts_counter += c->samples_per_buffer;
+
     frame_header.offset = offset;
 
     avio_write(s->pb, (uint8_t*)&frame_header, sizeof(frame_header));
@@ -102,7 +106,6 @@ static int shm_write_header(AVFormatContext *s) {
     SHMHeader header = {0};
     int bytes_per_sample;
     size_t required_shm_size;
-
     c->pts_counter = 0;
 
     pid_t pid = getpid();

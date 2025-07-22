@@ -15,6 +15,7 @@
 #include "libavformat/internal.h"
 #include "libavutil/intreadwrite.h"
 #include "libavcodec/avcodec.h"
+#include "libavutil/time.h" // Required for timing functions
 
 typedef struct {
     uint8_t *shm_buffer;
@@ -23,6 +24,11 @@ typedef struct {
     sem_t *empty_sem;
     sem_t *full_sem;
     SHMControlBlock *control_block;
+
+    // --- Metrics ---
+    int64_t metrics_last_time;
+    int metrics_frame_count;
+    int metrics_total_samples;
 } SHMDemuxerContext;
 
 static int shm_read_header(AVFormatContext *s) {
@@ -34,6 +40,11 @@ static int shm_read_header(AVFormatContext *s) {
         av_log(s, AV_LOG_ERROR, "Failed to read initial SHMHeader from pipe.\n");
         return AVERROR(EIO);
     }
+    
+    // Initialize metrics
+    c->metrics_last_time = -1;
+    c->metrics_frame_count = 0;
+    c->metrics_total_samples = 0;
 
     c->shm_fd = shm_open(header.shm_file, O_RDONLY, 0);
     if (c->shm_fd < 0) {
@@ -106,6 +117,12 @@ static int shm_read_packet(AVFormatContext *s, AVPacket *pkt) {
     FrameHeader frame_header;
     int ret;
 
+    // --- Metrics Start ---
+    if (c->metrics_last_time == -1) {
+        c->metrics_last_time = av_gettime_relative();
+    }
+    // --- Metrics End ---
+
     ret = avio_read(s->pb, (unsigned char*)&frame_header, sizeof(frame_header));
     if (ret != sizeof(frame_header)) {
         return AVERROR_EOF;
@@ -136,12 +153,23 @@ static int shm_read_packet(AVFormatContext *s, AVPacket *pkt) {
     pkt->stream_index = 0;
 
     if (sem_post(c->empty_sem) < 0) {
-        // This is tricky, the packet is already read. We can't easily undo.
-        // For now, log the error and continue. The producer might get stuck.
         av_log(s, AV_LOG_ERROR, "sem_post(empty_sem) failed: %s\n", strerror(errno));
     }
 
-    return 0; // Return 0 on success
+    c->metrics_frame_count++;
+    // Assuming float32, so 4 bytes per sample
+    c->metrics_total_samples += frame_header.size / 4; 
+
+    int64_t now = av_gettime_relative();
+    if (now - c->metrics_last_time >= 1000000) { // 1 second in microseconds
+        av_log(s, AV_LOG_DEBUG, "[METRICS] Demuxer Rate: %d fps, %d samples/sec\n", 
+               c->metrics_frame_count, c->metrics_total_samples);
+        c->metrics_frame_count = 0;
+        c->metrics_total_samples = 0;
+        c->metrics_last_time = now;
+    }
+
+    return 0; 
 }
 
 static int shm_read_close(AVFormatContext *s) {

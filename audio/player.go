@@ -1,8 +1,6 @@
 package audio
 
 import (
-	"bytes"
-	"encoding/binary"
 	"fmt"
 	"io"
 	"log"
@@ -37,6 +35,10 @@ type AudioPlayer struct {
 	fullSem     semaphore.Semaphore
 	stopChan    chan struct{}
 	isStreaming bool
+
+	internalBuffer          []byte
+	internalBufferOccupancy int
+	frameBufferSize         int
 }
 
 // NewAudioPlayer creates a new audio player.
@@ -61,7 +63,7 @@ func (p *AudioPlayer) getOutputArgs() (string, ffmpeg.KwArgs) {
 	switch runtime.GOOS {
 	case "darwin":
 		outputArgs["f"] = "audiotoolbox"
-		// The device is now just "/dev/null", which is the required output destination.
+		// audiotoolbox requires a destination.
 		device = "/dev/null"
 	case "linux":
 		outputArgs["f"] = "pulse"
@@ -85,8 +87,11 @@ func (p *AudioPlayer) Start(input <-chan []float32) error {
 	semaphore.RemoveSemaphore(emptySemName)
 	semaphore.RemoveSemaphore(fullSemName)
 
-	frameSize := 4096
-	shmSize := int(unsafe.Sizeof(C.SHMControlBlock{})) + (frameSize * numAudioBuffers)
+	p.frameBufferSize = 4096 // 1024 samples * 4 bytes/sample
+	shmSize := int(unsafe.Sizeof(C.SHMControlBlock{})) + (p.frameBufferSize * numAudioBuffers)
+
+	p.internalBuffer = make([]byte, p.frameBufferSize*2)
+	p.internalBufferOccupancy = 0
 
 	var err error
 	p.shm, err = sharedmemory.CreateSharedMemory(shmNameStr, shmSize)
@@ -126,8 +131,6 @@ func (p *AudioPlayer) Start(input <-chan []float32) error {
 
 	p.cmd = ffmpegCmdNode.Compile()
 
-	// We MUST prevent ffmpeg-go from capturing stdout if we are using it for audio data.
-	// We still want to see errors, so we'll redirect stderr to our own logger.
 	p.cmd.Stdout = nil
 	p.cmd.Stderr = log.Writer()
 
@@ -151,16 +154,62 @@ func (p *AudioPlayer) Start(input <-chan []float32) error {
 		return fmt.Errorf("failed to write header to FFmpeg player: %w", err)
 	}
 
-	go p.runProducer(input, frameSize)
+	go p.runProducer(input)
 	p.isStreaming = true
 
 	return nil
 }
 
-// runProducer is the loop that takes audio data, writes it to shared memory, and notifies FFmpeg.
-func (p *AudioPlayer) runProducer(input <-chan []float32, frameSize int) {
+// writeFullFrameToSHM writes one complete, fixed-size frame to shared memory.
+func (p *AudioPlayer) writeFullFrameToSHM(writeIndex *uint32, pts *int64) error {
+	if err := p.emptySem.Acquire(); err != nil {
+		return fmt.Errorf("producer failed to acquire empty semaphore: %w", err)
+	}
+
+	writeOffset := int64(unsafe.Sizeof(C.SHMControlBlock{})) + (int64(*writeIndex) * int64(p.frameBufferSize))
+
+	// Use the buffered data directly
+	_, err := p.shm.WriteAt(p.internalBuffer[:p.frameBufferSize], writeOffset)
+	if err != nil {
+		p.emptySem.Release()
+		return fmt.Errorf("producer failed to write to shared memory: %w", err)
+	}
+
+	frameHeader := C.FrameHeader{
+		cmdtype: 0,
+		size:    C.uint32_t(p.frameBufferSize),
+		pts:     C.int64_t(*pts),
+		offset:  C.uint64_t(writeOffset),
+	}
+	// A full frame corresponds to frameBufferSize / 4 samples
+	*pts += int64(p.frameBufferSize / 4)
+
+	frameHeaderBytes := (*[unsafe.Sizeof(frameHeader)]byte)(unsafe.Pointer(&frameHeader))[:]
+	if _, err := p.pipeWriter.Write(frameHeaderBytes); err != nil {
+		p.emptySem.Release()
+		return fmt.Errorf("producer failed to write frame header: %w", err)
+	}
+
+	*writeIndex = (*writeIndex + 1) % numAudioBuffers
+
+	p.internalBufferOccupancy -= p.frameBufferSize
+	if p.internalBufferOccupancy > 0 {
+		copy(p.internalBuffer, p.internalBuffer[p.frameBufferSize:p.frameBufferSize+p.internalBufferOccupancy])
+	}
+
+	if err := p.fullSem.Release(); err != nil {
+		log.Printf("Producer failed to release full semaphore: %v", err)
+	}
+
+	return nil
+}
+
+// runProducer is the loop that takes audio data, buffers it, and writes full frames to shared memory.
+func (p *AudioPlayer) runProducer(input <-chan []float32) {
 	defer func() {
 		if p.pipeWriter != nil {
+			controlBlockPtr := (*C.SHMControlBlock)(p.shm.GetPtr())
+			controlBlockPtr.eof = 1
 			eofHeader := C.FrameHeader{cmdtype: C.uint32_t(2)}
 			eofHeaderBytes := (*[unsafe.Sizeof(eofHeader)]byte)(unsafe.Pointer(&eofHeader))[:]
 			p.pipeWriter.Write(eofHeaderBytes)
@@ -181,41 +230,30 @@ func (p *AudioPlayer) runProducer(input <-chan []float32, frameSize int) {
 			return
 		case data, ok := <-input:
 			if !ok {
+				if p.internalBufferOccupancy > 0 {
+					paddingSize := p.frameBufferSize - p.internalBufferOccupancy
+					if paddingSize > 0 {
+						padding := make([]byte, paddingSize)
+						copy(p.internalBuffer[p.internalBufferOccupancy:], padding)
+						p.internalBufferOccupancy += paddingSize
+					}
+					p.writeFullFrameToSHM(&writeIndex, &pts)
+				}
 				return
 			}
 
-			if err := p.emptySem.Acquire(); err != nil {
-				log.Printf("Player failed to acquire empty semaphore: %v", err)
-				return
+			// Efficiently convert []float32 to []byte without extra allocations
+			if len(data) > 0 {
+				byteData := (*[1 << 30]byte)(unsafe.Pointer(&data[0]))[: len(data)*4 : len(data)*4]
+				copy(p.internalBuffer[p.internalBufferOccupancy:], byteData)
+				p.internalBufferOccupancy += len(byteData)
 			}
 
-			buf := new(bytes.Buffer)
-			binary.Write(buf, binary.LittleEndian, data)
-			byteData := buf.Bytes()
-
-			if len(byteData) > frameSize {
-				byteData = byteData[:frameSize]
-			}
-
-			writeOffset := int64(unsafe.Sizeof(C.SHMControlBlock{})) + (int64(writeIndex) * int64(frameSize))
-			p.shm.WriteAt(byteData, writeOffset)
-
-			frameHeader := C.FrameHeader{
-				cmdtype: 0, size: C.uint32_t(len(byteData)), pts: C.int64_t(pts), offset: C.uint64_t(writeOffset),
-			}
-			pts += int64(len(data))
-
-			frameHeaderBytes := (*[unsafe.Sizeof(frameHeader)]byte)(unsafe.Pointer(&frameHeader))[:]
-			if _, err := p.pipeWriter.Write(frameHeaderBytes); err != nil {
-				log.Printf("Player failed to write frame header: %v", err)
-				p.emptySem.Release()
-				return
-			}
-			writeIndex = (writeIndex + 1) % numAudioBuffers
-
-			if err := p.fullSem.Release(); err != nil {
-				log.Printf("Player failed to release full semaphore: %v", err)
-				return
+			for p.internalBufferOccupancy >= p.frameBufferSize {
+				if err := p.writeFullFrameToSHM(&writeIndex, &pts); err != nil {
+					log.Printf("Error writing frame to SHM: %v", err)
+					return
+				}
 			}
 		}
 	}
