@@ -8,6 +8,7 @@ import (
 
 	gl "github.com/go-gl/gl/v4.1-core/gl"
 	fft "github.com/mjibson/go-dsp/fft"
+	api "github.com/richinsley/goshadertoy/api"
 	audio "github.com/richinsley/goshadertoy/audio"
 	options "github.com/richinsley/goshadertoy/options"
 )
@@ -35,36 +36,37 @@ type MicChannel struct {
 }
 
 // NewMicChannel creates a channel that gets data from the default microphone using portaudio.
-func NewMicChannel(options *options.ShaderOptions) (*MicChannel, error) {
+func NewMicChannel(options *options.ShaderOptions, sampler api.Sampler) (*MicChannel, error) {
 	mic, err := audio.NewFFmpegAudioDevice(options)
 	if err != nil {
 		log.Printf("Could not initialize microphone: %v. Using silent fallback.", err)
-		return NewMicChannelWithDevice(audio.NewNullDevice(44100), options)
+		return NewMicChannelWithDevice(audio.NewNullDevice(44100), options, sampler)
 	}
 	log.Println("Initialized MicChannel with default PortAudio microphone.")
-	return NewMicChannelWithDevice(mic, options)
+	return NewMicChannelWithDevice(mic, options, sampler)
 }
 
 // NewMicChannelWithFFmpeg creates a channel that gets data from an FFmpeg process.
-func NewMicChannelWithFFmpeg(options *options.ShaderOptions) (*MicChannel, error) {
+func NewMicChannelWithFFmpeg(options *options.ShaderOptions, sampler api.Sampler) (*MicChannel, error) {
 	device, err := audio.NewFFmpegAudioDevice(options)
 	if err != nil {
 		log.Printf("Could not initialize FFmpeg audio device: %v. Using silent fallback.", err)
-		return NewMicChannelWithDevice(audio.NewNullDevice(44100), options)
+		return NewMicChannelWithDevice(audio.NewNullDevice(44100), options, sampler)
 	}
 	// device.Start()
-	return NewMicChannelWithDevice(device, options)
+	return NewMicChannelWithDevice(device, options, sampler)
 }
 
-func NewMicChannelWithDevice(device audio.AudioDevice, options *options.ShaderOptions) (*MicChannel, error) {
+func NewMicChannelWithDevice(device audio.AudioDevice, options *options.ShaderOptions, sampler api.Sampler) (*MicChannel, error) {
 	var textureID uint32
 	gl.GenTextures(1, &textureID)
 	gl.BindTexture(gl.TEXTURE_2D, textureID)
 	gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RG32F, textureWidth, textureHeight, 0, gl.RG, gl.FLOAT, nil)
-	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST)
-	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST)
-	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
-	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+	minFilter, magFilter := getFilterMode(sampler.Filter)
+	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, minFilter)
+	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, magFilter)
+	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, getWrapMode(sampler.Wrap))
+	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, getWrapMode(sampler.Wrap))
 	gl.BindTexture(gl.TEXTURE_2D, 0)
 
 	mc := &MicChannel{

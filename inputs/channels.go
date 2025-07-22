@@ -79,10 +79,10 @@ func GetChannels(shaderInputs []*api.ShadertoyChannel, width, height int, vao ui
 			var err error
 			if options != nil && *options.AudioInputDevice != "" {
 				// Use FFmpeg if the audio-input flag is set
-				newChannel, err = NewMicChannelWithFFmpeg(options)
+				newChannel, err = NewMicChannelWithFFmpeg(options, chInput.Sampler)
 			} else {
 				// Fallback to the default portaudio microphone
-				newChannel, err = NewMicChannel(options)
+				newChannel, err = NewMicChannel(options, chInput.Sampler)
 			}
 
 			if err != nil {
@@ -90,6 +90,17 @@ func GetChannels(shaderInputs []*api.ShadertoyChannel, width, height int, vao ui
 			}
 			channels[channelIndex] = newChannel
 			log.Printf("Initialized MicChannel %d.", channelIndex)
+		case "music":
+			if *options.AudioInputDevice == "" && *options.AudioInputFile == "" {
+				*options.AudioInputFile = chInput.MusicFile
+			}
+			// Use FFmpeg if the audio-input flag is set
+			newChannel, err := NewMicChannelWithFFmpeg(options, chInput.Sampler)
+			if err != nil {
+				log.Fatalf("Failed to create mic channel: %v", err)
+			}
+			channels[channelIndex] = newChannel
+			log.Printf("Initialized MusicChannel %d.", channelIndex)
 		default:
 			if chInput.CType != "" {
 				log.Printf("Warning: Unsupported channel type '%s' for channel %d.", chInput.CType, channelIndex)

@@ -177,6 +177,7 @@ type ShadertoyChannel struct {
 	Volume    *VolumeData    // For 3D volume textures
 	CubeData  [6]image.Image // For cubemaps
 	BufferRef string         // Buffer name that will be attached to this input channel
+	MusicFile string         // For audio input channels
 }
 
 // BufferRenderPass represents a processed buffer pass.
@@ -503,6 +504,45 @@ func downloadMediaChannels(inputs []Input, passType string, useCache bool) ([]*S
 			channel.CubeData = images
 		case "mic":
 			// For microphone input, we don't download anything, just create a placeholder channel.
+		case "music":
+			mediaURL := shadertoyMediaURL + inp.Src
+			cachePath := filepath.Join(cacheDir, filepath.Base(inp.Src))
+
+			havefile := false
+
+			if useCache {
+				if f, err := os.Open(cachePath); err == nil {
+					f.Close()
+					if err != nil {
+						havefile = true
+					}
+				}
+			}
+
+			if !havefile { // Not cached or cache read failed
+				resp, err := httpClient.Get(mediaURL)
+				if err != nil {
+					return nil, false, fmt.Errorf("failed to download media %s: %w", mediaURL, err)
+				}
+				defer resp.Body.Close()
+
+				if resp.StatusCode != http.StatusOK {
+					return nil, false, fmt.Errorf("failed to load media %s, status code: %d", mediaURL, resp.StatusCode)
+				}
+
+				// Read into a buffer to allow both decoding and saving
+				data, err := io.ReadAll(resp.Body)
+				if err != nil {
+					return nil, false, fmt.Errorf("failed to read media data from %s: %w", mediaURL, err)
+				}
+
+				if useCache {
+					if err := os.WriteFile(cachePath, data, 0644); err != nil {
+						log.Printf("Warning: failed to save media to cache at %s: %v", cachePath, err)
+					}
+				}
+			}
+			channel.MusicFile = cachePath // Store the path to the music file
 		default:
 			log.Printf("Warning: unsupported input type '%s'", inp.CType)
 			complete = false
