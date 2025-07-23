@@ -24,11 +24,14 @@ typedef struct {
  * This structure contains the video stream's properties.
  */
 typedef struct {
-    char shm_file[512];
-    char empty_sem_name[256];
-    char full_sem_name[256];
+    char shm_file_video[512];
+    char empty_sem_name_video[256];
+    char full_sem_name_video[256];
+    char shm_file_audio[512];
+    char empty_sem_name_audio[256];
+    char full_sem_name_audio[256];
     uint32_t version;
-    uint32_t frametype; // 0 for video, 1 for audio
+    uint32_t stream_count; // Number of streams (1 or 2)
     uint32_t frame_rate; // Frame rate in frames per second.
     uint32_t channels;   // Number of audio channels (0 for video).
     uint32_t sample_rate; // Audio sample rate (0 for video).

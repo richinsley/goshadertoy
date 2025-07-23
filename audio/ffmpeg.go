@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"os"
 	"os/exec"
 	"strings"
 	"syscall"
@@ -68,21 +69,25 @@ func NewFFmpegAudioDevice(options *options.ShaderOptions) (*FFmpegAudioDevice, e
 	return retv, nil
 }
 
-func (d *FFmpegAudioDevice) getArgs() (inputdev string, inputArgs ffmpeg.KwArgs, outputArgs ffmpeg.KwArgs) {
-	inputArgs = ffmpeg.KwArgs{}
+func (d *FFmpegAudioDevice) Start() (<-chan []float32, error) {
+	d.audioChan = make(chan []float32, 16)
+
+	pipeReader, pipeWriter := io.Pipe()
+	d.pipeReader = pipeReader
+
+	log.Printf("Starting FFmpeg audio capture for input: %s", d.inputFile)
+
+	inputArgs := ffmpeg.KwArgs{}
 	if *d.options.AudioInputDevice != "" {
-		inputdev = *d.options.AudioInputDevice
 		inputArgs["f"] = "avfoundation" // Default for macOS
 		inputArgs["fflags"] = "nobuffer"
-
 	} else if *d.options.AudioInputFile != "" {
-		inputdev = *d.options.AudioInputFile
 		if *d.options.Mode == "stream" || *d.options.Mode == "live" {
 			inputArgs["re"] = ""
 		}
 	}
 
-	outputArgs = ffmpeg.KwArgs{
+	outputArgs := ffmpeg.KwArgs{
 		"f":                  "shm_muxer",
 		"samples_per_buffer": "1024", // This must match the logic in the client
 		"c:a":                "pcm_f32le",
@@ -91,19 +96,7 @@ func (d *FFmpegAudioDevice) getArgs() (inputdev string, inputArgs ffmpeg.KwArgs,
 		"flush_packets":      "1",
 	}
 
-	return inputdev, inputArgs, outputArgs
-}
-
-func (d *FFmpegAudioDevice) Start() (<-chan []float32, error) {
-	inputdev, inputArgs, outputArgs := d.getArgs()
-	d.audioChan = make(chan []float32, 16)
-
-	pipeReader, pipeWriter := io.Pipe()
-	d.pipeReader = pipeReader
-
-	log.Printf("Starting FFmpeg audio capture for input: %s", d.inputFile)
-
-	ffmpegNode := ffmpeg.Input(inputdev, inputArgs)
+	ffmpegNode := ffmpeg.Input(d.inputFile, inputArgs)
 	ffmpegCmd := ffmpegNode.Output("pipe:", outputArgs).
 		WithOutput(pipeWriter).ErrorToStdOut()
 
@@ -112,6 +105,7 @@ func (d *FFmpegAudioDevice) Start() (<-chan []float32, error) {
 	}
 
 	d.cmd = ffmpegCmd.Compile()
+	d.cmd.Stderr = os.Stderr
 
 	go func() {
 		err := d.cmd.Run()
@@ -122,26 +116,15 @@ func (d *FFmpegAudioDevice) Start() (<-chan []float32, error) {
 	}()
 
 	if d.player != nil {
-		// 1. Create a channel for the player.
 		playerChan := make(chan []float32, 16)
 		d.player.Start(playerChan)
-
-		// 2. Create a single channel for the main audio producer loop.
 		producerChan := make(chan []float32, 16)
-
-		// 3. Use Tee to fan-out the audio from the producer to both consumers.
-		//    Tee is in the same 'audio' package and is directly available.
 		go Tee(producerChan, d.audioChan, playerChan)
-
-		// 4. Start the main audio loop, which now only produces to a single channel.
-		//    When it finishes, it closes producerChan, which in turn closes the consumer channels.
 		go func() {
 			defer close(producerChan)
-			d.runAudioLoop(producerChan) // runAudioLoop now only writes to one channel.
+			d.runAudioLoop(producerChan)
 		}()
-
 	} else {
-		// when there is no player.
 		go func() {
 			defer close(d.audioChan)
 			d.runAudioLoop(d.audioChan)
@@ -181,10 +164,10 @@ func (d *FFmpegAudioDevice) runAudioLoop(outputs ...chan<- []float32) {
 	d.sampleRate = int(shmHeader.sample_rate)
 	log.Printf("Received SHMHeader from FFmpeg: SampleRate=%d, Channels=%d", d.sampleRate, shmHeader.channels)
 
-	shmNameFromHeader := C.GoString(&shmHeader.shm_file[0])
+	shmNameFromHeader := C.GoString(&shmHeader.shm_file_audio[0])
 	shmNameForGo := strings.TrimPrefix(shmNameFromHeader, "/")
-	emptySemName := C.GoString(&shmHeader.empty_sem_name[0])
-	fullSemName := C.GoString(&shmHeader.full_sem_name[0])
+	emptySemName := C.GoString(&shmHeader.empty_sem_name_audio[0])
+	fullSemName := C.GoString(&shmHeader.full_sem_name_audio[0])
 
 	var err error
 	d.emptySem, err = semaphore.OpenSemaphore(emptySemName)
@@ -198,8 +181,6 @@ func (d *FFmpegAudioDevice) runAudioLoop(outputs ...chan<- []float32) {
 		return
 	}
 
-	// --- SHM Size Calculation ---
-	// This logic must exactly match the client (shmux_example) and the producer (shm_muxer.c).
 	const samplesPerBuffer = 1024
 	const numBuffers = 3
 	bytesPerSample := int(shmHeader.bit_depth / 8)
@@ -232,7 +213,7 @@ func (d *FFmpegAudioDevice) runAudioLoop(outputs ...chan<- []float32) {
 				return
 			}
 
-			if frameHeader.cmdtype == 0 { // Audio Data
+			if frameHeader.cmdtype == 1 { // Audio Data
 				if err := d.fullSem.Acquire(); err != nil {
 					return
 				}
@@ -246,7 +227,6 @@ func (d *FFmpegAudioDevice) runAudioLoop(outputs ...chan<- []float32) {
 					reader := bytes.NewReader(audioData)
 					binary.Read(reader, binary.LittleEndian, &floatData)
 
-					// Fan out to all output channels
 					for _, out := range outputs {
 						out <- floatData
 					}

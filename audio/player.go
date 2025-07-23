@@ -10,9 +10,9 @@ import (
 	"strings"
 	"unsafe"
 
-	"github.com/richinsley/goshadertoy/options"
-	"github.com/richinsley/goshadertoy/semaphore"
-	"github.com/richinsley/goshadertoy/sharedmemory"
+	options "github.com/richinsley/goshadertoy/options"
+	semaphore "github.com/richinsley/goshadertoy/semaphore"
+	sharedmemory "github.com/richinsley/goshadertoy/sharedmemory"
 	ffmpeg "github.com/u2takey/ffmpeg-go"
 )
 
@@ -143,11 +143,11 @@ func (p *AudioPlayer) Start(input <-chan []float32) error {
 	}()
 
 	header := C.SHMHeader{
-		frametype: 1, sample_rate: 44100, channels: 1, bit_depth: 32, version: 1,
+		stream_count: 1, sample_rate: 44100, channels: 1, bit_depth: 32, version: 1,
 	}
-	C.strncpy((*C.char)(unsafe.Pointer(&header.shm_file[0])), C.CString("/"+shmNameStr), 511)
-	C.strncpy((*C.char)(unsafe.Pointer(&header.empty_sem_name[0])), C.CString(emptySemName), 255)
-	C.strncpy((*C.char)(unsafe.Pointer(&header.full_sem_name[0])), C.CString(fullSemName), 255)
+	C.strncpy((*C.char)(unsafe.Pointer(&header.shm_file_audio[0])), C.CString("/"+shmNameStr), 511)
+	C.strncpy((*C.char)(unsafe.Pointer(&header.empty_sem_name_audio[0])), C.CString(emptySemName), 255)
+	C.strncpy((*C.char)(unsafe.Pointer(&header.full_sem_name_audio[0])), C.CString(fullSemName), 255)
 
 	headerBytes := (*[unsafe.Sizeof(header)]byte)(unsafe.Pointer(&header))[:]
 	if _, err := pipeWriter.Write(headerBytes); err != nil {
@@ -176,7 +176,7 @@ func (p *AudioPlayer) writeFullFrameToSHM(writeIndex *uint32, pts *int64) error 
 	}
 
 	frameHeader := C.FrameHeader{
-		cmdtype: 0,
+		cmdtype: 1, // audio
 		size:    C.uint32_t(p.frameBufferSize),
 		pts:     C.int64_t(*pts),
 		offset:  C.uint64_t(writeOffset),

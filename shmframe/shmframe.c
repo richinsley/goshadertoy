@@ -18,12 +18,19 @@
 #include "libavutil/time.h" // Required for timing functions
 
 typedef struct {
-    uint8_t *shm_buffer;
-    int shm_buffer_size;
-    int shm_fd;
-    sem_t *empty_sem;
-    sem_t *full_sem;
-    SHMControlBlock *control_block;
+    uint8_t *shm_buffer_video;
+    int shm_buffer_size_video;
+    int shm_fd_video;
+    sem_t *empty_sem_video;
+    sem_t *full_sem_video;
+    SHMControlBlock *control_block_video;
+
+    uint8_t *shm_buffer_audio;
+    int shm_buffer_size_audio;
+    int shm_fd_audio;
+    sem_t *empty_sem_audio;
+    sem_t *full_sem_audio;
+    SHMControlBlock *control_block_audio;
 
     // --- Metrics ---
     int64_t metrics_last_time;
@@ -34,7 +41,7 @@ typedef struct {
 static int shm_read_header(AVFormatContext *s) {
     SHMDemuxerContext *c = s->priv_data;
     SHMHeader header;
-    AVStream *st;
+    AVStream *st_video = NULL, *st_audio = NULL;
 
     if (avio_read(s->pb, (unsigned char*)&header, sizeof(header)) != sizeof(header)) {
         av_log(s, AV_LOG_ERROR, "Failed to read initial SHMHeader from pipe.\n");
@@ -46,67 +53,112 @@ static int shm_read_header(AVFormatContext *s) {
     c->metrics_frame_count = 0;
     c->metrics_total_samples = 0;
 
-    c->shm_fd = shm_open(header.shm_file, O_RDONLY, 0);
-    if (c->shm_fd < 0) {
-        av_log(s, AV_LOG_ERROR, "Failed to open shared memory '%s': %s\n", header.shm_file, strerror(errno));
-        return AVERROR(errno);
+    // Video Setup (only if video parameters are present)
+    if (header.width > 0 && header.height > 0) {
+        c->shm_fd_video = shm_open(header.shm_file_video, O_RDONLY, 0);
+        if (c->shm_fd_video < 0) {
+            av_log(s, AV_LOG_ERROR, "Failed to open video shared memory '%s': %s\n", header.shm_file_video, strerror(errno));
+            return AVERROR(errno);
+        }
+
+        c->empty_sem_video = sem_open(header.empty_sem_name_video, 0);
+        if (c->empty_sem_video == SEM_FAILED) {
+            av_log(s, AV_LOG_ERROR, "Failed to open video empty semaphore '%s': %s\n", header.empty_sem_name_video, strerror(errno));
+            close(c->shm_fd_video);
+            return AVERROR(errno);
+        }
+
+        c->full_sem_video = sem_open(header.full_sem_name_video, 0);
+        if (c->full_sem_video == SEM_FAILED) {
+            av_log(s, AV_LOG_ERROR, "Failed to open video full semaphore '%s': %s\n", header.full_sem_name_video, strerror(errno));
+            sem_close(c->empty_sem_video);
+            close(c->shm_fd_video);
+            return AVERROR(errno);
+        }
+
+        struct stat st_shm_video;
+        if (fstat(c->shm_fd_video, &st_shm_video) < 0) {
+            av_log(s, AV_LOG_ERROR, "fstat on video shared memory failed: %s\n", strerror(errno));
+            close(c->shm_fd_video);
+            return AVERROR(errno);
+        }
+        c->shm_buffer_size_video = st_shm_video.st_size;
+
+        c->shm_buffer_video = mmap(NULL, c->shm_buffer_size_video, PROT_READ, MAP_SHARED, c->shm_fd_video, 0);
+        if (c->shm_buffer_video == MAP_FAILED) {
+            av_log(s, AV_LOG_ERROR, "mmap for video failed: %s\n", strerror(errno));
+            close(c->shm_fd_video);
+            return AVERROR(errno);
+        }
+        c->control_block_video = (SHMControlBlock*)c->shm_buffer_video;
+
+        st_video = avformat_new_stream(s, NULL);
+        if (!st_video) {
+            munmap(c->shm_buffer_video, c->shm_buffer_size_video);
+            close(c->shm_fd_video);
+            return AVERROR(ENOMEM);
+        }
+        st_video->time_base = av_inv_q(av_d2q(header.frame_rate, 1000000));
+        st_video->r_frame_rate = av_d2q(header.frame_rate, 1000000);
+        st_video->avg_frame_rate = st_video->r_frame_rate;
+        st_video->codecpar->codec_type = AVMEDIA_TYPE_VIDEO;
+        st_video->codecpar->codec_id = AV_CODEC_ID_RAWVIDEO;
+        st_video->codecpar->width = header.width;
+        st_video->codecpar->height = header.height;
+        st_video->codecpar->format = header.pix_fmt;
     }
 
-    c->empty_sem = sem_open(header.empty_sem_name, 0);
-    if (c->empty_sem == SEM_FAILED) {
-        av_log(s, AV_LOG_ERROR, "Failed to open empty semaphore '%s': %s\n", header.empty_sem_name, strerror(errno));
-        close(c->shm_fd);
-        return AVERROR(errno);
-    }
+    // Audio Setup (only if audio parameters are present)
+    if (header.sample_rate > 0 && header.channels > 0) {
+        c->shm_fd_audio = shm_open(header.shm_file_audio, O_RDONLY, 0);
+        if (c->shm_fd_audio < 0) {
+            av_log(s, AV_LOG_ERROR, "Failed to open audio shared memory '%s': %s\n", header.shm_file_audio, strerror(errno));
+            return AVERROR(errno);
+        }
 
-    c->full_sem = sem_open(header.full_sem_name, 0);
-    if (c->full_sem == SEM_FAILED) {
-        av_log(s, AV_LOG_ERROR, "Failed to open full semaphore '%s': %s\n", header.full_sem_name, strerror(errno));
-        sem_close(c->empty_sem);
-        close(c->shm_fd);
-        return AVERROR(errno);
-    }
+        c->empty_sem_audio = sem_open(header.empty_sem_name_audio, 0);
+        if (c->empty_sem_audio == SEM_FAILED) {
+            av_log(s, AV_LOG_ERROR, "Failed to open audio empty semaphore '%s': %s\n", header.empty_sem_name_audio, strerror(errno));
+            close(c->shm_fd_audio);
+            return AVERROR(errno);
+        }
 
-    struct stat st_shm;
-    if (fstat(c->shm_fd, &st_shm) < 0) {
-        av_log(s, AV_LOG_ERROR, "fstat on shared memory failed: %s\n", strerror(errno));
-        close(c->shm_fd);
-        return AVERROR(errno);
-    }
-    c->shm_buffer_size = st_shm.st_size;
+        c->full_sem_audio = sem_open(header.full_sem_name_audio, 0);
+        if (c->full_sem_audio == SEM_FAILED) {
+            av_log(s, AV_LOG_ERROR, "Failed to open audio full semaphore '%s': %s\n", header.full_sem_name_audio, strerror(errno));
+            sem_close(c->empty_sem_audio);
+            close(c->shm_fd_audio);
+            return AVERROR(errno);
+        }
 
-    c->shm_buffer = mmap(NULL, c->shm_buffer_size, PROT_READ, MAP_SHARED, c->shm_fd, 0);
-    if (c->shm_buffer == MAP_FAILED) {
-        av_log(s, AV_LOG_ERROR, "mmap failed: %s\n", strerror(errno));
-        close(c->shm_fd);
-        return AVERROR(errno);
-    }
+        struct stat st_shm_audio;
+        if (fstat(c->shm_fd_audio, &st_shm_audio) < 0) {
+            av_log(s, AV_LOG_ERROR, "fstat on audio shared memory failed: %s\n", strerror(errno));
+            close(c->shm_fd_audio);
+            return AVERROR(errno);
+        }
+        c->shm_buffer_size_audio = st_shm_audio.st_size;
 
-    c->control_block = (SHMControlBlock*)c->shm_buffer;
+        c->shm_buffer_audio = mmap(NULL, c->shm_buffer_size_audio, PROT_READ, MAP_SHARED, c->shm_fd_audio, 0);
+        if (c->shm_buffer_audio == MAP_FAILED) {
+            av_log(s, AV_LOG_ERROR, "mmap for audio failed: %s\n", strerror(errno));
+            close(c->shm_fd_audio);
+            return AVERROR(errno);
+        }
+        c->control_block_audio = (SHMControlBlock*)c->shm_buffer_audio;
 
-    st = avformat_new_stream(s, NULL);
-    if (!st) {
-        munmap(c->shm_buffer, c->shm_buffer_size);
-        close(c->shm_fd);
-        return AVERROR(ENOMEM);
-    }
-
-    if (header.frametype == 1) { // Audio
-        st->codecpar->codec_type = AVMEDIA_TYPE_AUDIO;
-        st->codecpar->codec_id = AV_CODEC_ID_PCM_F32LE;
-        st->codecpar->format = AV_SAMPLE_FMT_FLT;
-        st->codecpar->sample_rate = header.sample_rate;
-        av_channel_layout_default(&st->codecpar->ch_layout, header.channels);
-        st->time_base = (AVRational){1, st->codecpar->sample_rate};
-    } else { // Video
-        st->time_base = av_inv_q(av_d2q(header.frame_rate, 1000000));
-        st->r_frame_rate = av_d2q(header.frame_rate, 1000000);
-        st->avg_frame_rate = st->r_frame_rate;
-        st->codecpar->codec_type = AVMEDIA_TYPE_VIDEO;
-        st->codecpar->codec_id = AV_CODEC_ID_RAWVIDEO;
-        st->codecpar->width = header.width;
-        st->codecpar->height = header.height;
-        st->codecpar->format = header.pix_fmt;
+        st_audio = avformat_new_stream(s, NULL);
+        if (!st_audio) {
+            munmap(c->shm_buffer_audio, c->shm_buffer_size_audio);
+            close(c->shm_fd_audio);
+            return AVERROR(ENOMEM);
+        }
+        st_audio->codecpar->codec_type = AVMEDIA_TYPE_AUDIO;
+        st_audio->codecpar->codec_id = AV_CODEC_ID_PCM_F32LE;
+        st_audio->codecpar->format = AV_SAMPLE_FMT_FLT;
+        st_audio->codecpar->sample_rate = header.sample_rate;
+        av_channel_layout_default(&st_audio->codecpar->ch_layout, header.channels);
+        st_audio->time_base = (AVRational){1, st_audio->codecpar->sample_rate};
     }
 
     return 0;
@@ -132,34 +184,50 @@ static int shm_read_packet(AVFormatContext *s, AVPacket *pkt) {
         return AVERROR_EOF;
     }
 
-    if (sem_wait(c->full_sem) < 0) {
-        return AVERROR(errno);
+    if (frame_header.cmdtype == 0) { // Video
+        if (sem_wait(c->full_sem_video) < 0) {
+            return AVERROR(errno);
+        }
+        if (frame_header.offset + frame_header.size > c->shm_buffer_size_video) {
+            sem_post(c->empty_sem_video);
+            return AVERROR(EINVAL);
+        }
+        ret = av_new_packet(pkt, frame_header.size);
+        if (ret < 0) {
+            sem_post(c->empty_sem_video);
+            return ret;
+        }
+        memcpy(pkt->data, c->shm_buffer_video + frame_header.offset, frame_header.size);
+        pkt->stream_index = 0; // Video stream
+        if (sem_post(c->empty_sem_video) < 0) {
+            av_log(s, AV_LOG_ERROR, "sem_post(empty_sem_video) failed: %s\n", strerror(errno));
+        }
+    } else if (frame_header.cmdtype == 1) { // Audio
+        if (sem_wait(c->full_sem_audio) < 0) {
+            return AVERROR(errno);
+        }
+        if (frame_header.offset + frame_header.size > c->shm_buffer_size_audio) {
+            sem_post(c->empty_sem_audio);
+            return AVERROR(EINVAL);
+        }
+        ret = av_new_packet(pkt, frame_header.size);
+        if (ret < 0) {
+            sem_post(c->empty_sem_audio);
+            return ret;
+        }
+        memcpy(pkt->data, c->shm_buffer_audio + frame_header.offset, frame_header.size);
+        pkt->stream_index = s->nb_streams - 1; // Audio stream is always last
+        if (sem_post(c->empty_sem_audio) < 0) {
+            av_log(s, AV_LOG_ERROR, "sem_post(empty_sem_audio) failed: %s\n", strerror(errno));
+        }
+        c->metrics_total_samples += frame_header.size / 4;
     }
 
-    if (frame_header.offset + frame_header.size > c->shm_buffer_size) {
-        sem_post(c->empty_sem);
-        return AVERROR(EINVAL);
-    }
-    
-    ret = av_new_packet(pkt, frame_header.size);
-    if (ret < 0) {
-        sem_post(c->empty_sem);
-        return ret;
-    }
-
-    memcpy(pkt->data, c->shm_buffer + frame_header.offset, frame_header.size);
     pkt->pts = frame_header.pts;
     pkt->dts = pkt->pts;
-    pkt->stream_index = 0;
-
-    if (sem_post(c->empty_sem) < 0) {
-        av_log(s, AV_LOG_ERROR, "sem_post(empty_sem) failed: %s\n", strerror(errno));
-    }
 
     c->metrics_frame_count++;
-    // Assuming float32, so 4 bytes per sample
-    c->metrics_total_samples += frame_header.size / 4; 
-
+    
     int64_t now = av_gettime_relative();
     if (now - c->metrics_last_time >= 1000000) { // 1 second in microseconds
         av_log(s, AV_LOG_DEBUG, "[METRICS] Demuxer Rate: %d fps, %d samples/sec\n", 
@@ -174,17 +242,30 @@ static int shm_read_packet(AVFormatContext *s, AVPacket *pkt) {
 
 static int shm_read_close(AVFormatContext *s) {
     SHMDemuxerContext *c = s->priv_data;
-    if (c->shm_buffer) {
-        munmap(c->shm_buffer, c->shm_buffer_size);
+    if (c->shm_buffer_video) {
+        munmap(c->shm_buffer_video, c->shm_buffer_size_video);
     }
-    if (c->shm_fd >= 0) {
-        close(c->shm_fd);
+    if (c->shm_fd_video >= 0) {
+        close(c->shm_fd_video);
     }
-    if (c->empty_sem != SEM_FAILED) {
-        sem_close(c->empty_sem);
+    if (c->empty_sem_video != SEM_FAILED) {
+        sem_close(c->empty_sem_video);
     }
-    if (c->full_sem != SEM_FAILED) {
-        sem_close(c->full_sem);
+    if (c->full_sem_video != SEM_FAILED) {
+        sem_close(c->full_sem_video);
+    }
+
+    if (c->shm_buffer_audio) {
+        munmap(c->shm_buffer_audio, c->shm_buffer_size_audio);
+    }
+    if (c->shm_fd_audio >= 0) {
+        close(c->shm_fd_audio);
+    }
+    if (c->empty_sem_audio != SEM_FAILED) {
+        sem_close(c->empty_sem_audio);
+    }
+    if (c->full_sem_audio != SEM_FAILED) {
+        sem_close(c->full_sem_audio);
     }
     return 0;
 }

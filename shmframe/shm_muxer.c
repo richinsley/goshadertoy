@@ -25,232 +25,286 @@
 // Context for the SHM muxer
 typedef struct {
     const AVClass *class;
-    // SHM and Semaphore resources
-    uint8_t *buffer;
-    int buffer_size;
-    int shm_fd;
-    char shm_name[512];
-    char empty_sem_name[256];
-    char full_sem_name[256];
-    sem_t *empty_sem;
-    sem_t *full_sem;
-    SHMControlBlock *control_block;
-    uint8_t *frame_buffers[NUM_BUFFERS];
-    uint32_t write_index;
+    
+    // Video resources
+    uint8_t *buffer_video;
+    int buffer_size_video;
+    int shm_fd_video;
+    sem_t *empty_sem_video;
+    sem_t *full_sem_video;
+    SHMControlBlock *control_block_video;
+    uint8_t *frame_buffers_video[NUM_BUFFERS];
+    uint32_t write_index_video;
+    size_t frame_buffer_size_video;
+
+    // Audio resources
+    uint8_t *buffer_audio;
+    int buffer_size_audio;
+    int shm_fd_audio;
+    sem_t *empty_sem_audio;
+    sem_t *full_sem_audio;
+    SHMControlBlock *control_block_audio;
+    uint8_t *frame_buffers_audio[NUM_BUFFERS];
+    uint32_t write_index_audio;
+    size_t frame_buffer_size_audio;
 
     // Muxer options
     int samples_per_buffer;
 
-    // Internal buffering state
-    uint8_t *internal_buffer;
-    int internal_buffer_size;
-    int internal_buffer_occupancy;
-    size_t frame_buffer_size;
-    int64_t pts_counter;
+    // Internal buffering state for audio
+    uint8_t *internal_buffer_audio;
+    int internal_buffer_size_audio;
+    int internal_buffer_occupancy_audio;
+    int64_t pts_counter_audio;
 
 } SHMMuxerContext;
 
-// Helper function to write one full, buffered frame to shared memory
-static int write_full_frame(AVFormatContext *s) {
+// Helper function to write one full, buffered audio frame to shared memory
+static int write_full_audio_frame(AVFormatContext *s) {
     SHMMuxerContext *c = s->priv_data;
 
-    if (sem_wait(c->empty_sem) < 0) {
-        av_log(s, AV_LOG_ERROR, "sem_wait(empty_sem) failed: %s\n", strerror(errno));
+    if (sem_wait(c->empty_sem_audio) < 0) {
+        av_log(s, AV_LOG_ERROR, "sem_wait(empty_sem_audio) failed: %s\n", strerror(errno));
         return AVERROR(errno);
     }
 
-    uint8_t *write_buffer = c->frame_buffers[c->write_index];
-    uint64_t offset = write_buffer - c->buffer;
+    uint8_t *write_buffer = c->frame_buffers_audio[c->write_index_audio];
+    uint64_t offset = write_buffer - c->buffer_audio;
 
     // Copy one full frame from our internal buffer to the shared memory slot
-    memcpy(write_buffer, c->internal_buffer, c->frame_buffer_size);
+    memcpy(write_buffer, c->internal_buffer_audio, c->frame_buffer_size_audio);
 
     FrameHeader frame_header = {0};
-    frame_header.cmdtype = 0;
-    frame_header.size = c->frame_buffer_size;
-    
-    // Use the pts_counter and increment it by the number of samples per frame.
-    frame_header.pts = c->pts_counter;
-    c->pts_counter += c->samples_per_buffer;
-
+    frame_header.cmdtype = 1;
+    frame_header.size = c->frame_buffer_size_audio;
+    frame_header.pts = c->pts_counter_audio;
+    c->pts_counter_audio += c->samples_per_buffer;
     frame_header.offset = offset;
 
     avio_write(s->pb, (uint8_t*)&frame_header, sizeof(frame_header));
     avio_flush(s->pb);
 
-    c->write_index = (c->write_index + 1) % NUM_BUFFERS;
+    c->write_index_audio = (c->write_index_audio + 1) % NUM_BUFFERS;
 
-    if (sem_post(c->full_sem) < 0) {
-        av_log(s, AV_LOG_ERROR, "sem_post(full_sem) failed: %s\n", strerror(errno));
+    if (sem_post(c->full_sem_audio) < 0) {
+        av_log(s, AV_LOG_ERROR, "sem_post(full_sem_audio) failed: %s\n", strerror(errno));
     }
 
     // Shift the remaining data in the internal buffer to the beginning
-    c->internal_buffer_occupancy -= c->frame_buffer_size;
-    if (c->internal_buffer_occupancy > 0) {
-        memmove(c->internal_buffer, c->internal_buffer + c->frame_buffer_size, c->internal_buffer_occupancy);
+    c->internal_buffer_occupancy_audio -= c->frame_buffer_size_audio;
+    if (c->internal_buffer_occupancy_audio > 0) {
+        memmove(c->internal_buffer_audio, c->internal_buffer_audio + c->frame_buffer_size_audio, c->internal_buffer_occupancy_audio);
     }
 
     return 0;
 }
 
-
 // write_header: Called when FFmpeg starts writing the output
 static int shm_write_header(AVFormatContext *s) {
     SHMMuxerContext *c = s->priv_data;
-    AVStream *st;
-    if (s->nb_streams == 0) {
-        av_log(s, AV_LOG_ERROR, "No streams were mapped to the SHM muxer.\n");
-        return AVERROR(EINVAL);
-    }
-    st = s->streams[0];
+    AVStream *st_video = NULL, *st_audio = NULL;
     SHMHeader header = {0};
-    int bytes_per_sample;
-    size_t required_shm_size;
-    c->pts_counter = 0;
-
     pid_t pid = getpid();
-    snprintf(c->shm_name, sizeof(c->shm_name), "/goshadertoy_audio_%d", pid);
-    snprintf(c->empty_sem_name, sizeof(c->empty_sem_name), "goshadertoy_audio_empty_%d", pid);
-    snprintf(c->full_sem_name, sizeof(c->full_sem_name), "goshadertoy_audio_full_%d", pid);
 
-    if (st->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
-        header.frametype = 1;
-        header.sample_rate = st->codecpar->sample_rate;
-        header.channels = st->codecpar->ch_layout.nb_channels;
-        header.pix_fmt = st->codecpar->format; // This is actually sample format
-        bytes_per_sample = av_get_bytes_per_sample(st->codecpar->format);
-        header.bit_depth = bytes_per_sample * 8;
-    } else {
-        av_log(s, AV_LOG_ERROR, "SHM muxer only supports audio streams.\n");
+    for (int i = 0; i < s->nb_streams; i++) {
+        if (s->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+            st_video = s->streams[i];
+        } else if (s->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
+            st_audio = s->streams[i];
+        }
+    }
+
+    if (!st_video && !st_audio) {
+        av_log(s, AV_LOG_ERROR, "No audio or video streams were mapped to the SHM muxer.\n");
         return AVERROR(EINVAL);
     }
-
-    c->frame_buffer_size = c->samples_per_buffer * header.channels * bytes_per_sample;
-
-    // Allocate internal buffer to accumulate data. Make it twice the size of a frame
-    // to handle incoming packets larger than one frame.
-    c->internal_buffer_size = c->frame_buffer_size * 2;
-    c->internal_buffer = av_malloc(c->internal_buffer_size);
-    if (!c->internal_buffer) {
-        return AVERROR(ENOMEM);
-    }
-    c->internal_buffer_occupancy = 0;
-
-
-    av_strlcpy(header.shm_file, c->shm_name, sizeof(header.shm_file));
-    av_strlcpy(header.empty_sem_name, c->empty_sem_name, sizeof(header.empty_sem_name));
-    av_strlcpy(header.full_sem_name, c->full_sem_name, sizeof(header.full_sem_name));
+    
     header.version = 1;
+    header.stream_count = s->nb_streams;
+    c->pts_counter_audio = 0;
 
+    // Video setup
+    if (st_video) {
+        snprintf(header.shm_file_video, sizeof(header.shm_file_video), "/goshadertoy_video_%d", pid);
+        snprintf(header.empty_sem_name_video, sizeof(header.empty_sem_name_video), "goshadertoy_video_empty_%d", pid);
+        snprintf(header.full_sem_name_video, sizeof(header.full_sem_name_video), "goshadertoy_video_full_%d", pid);
+
+        header.width = st_video->codecpar->width;
+        header.height = st_video->codecpar->height;
+        header.pix_fmt = st_video->codecpar->format;
+        header.frame_rate = av_q2d(st_video->r_frame_rate);
+        c->frame_buffer_size_video = av_image_get_buffer_size(header.pix_fmt, header.width, header.height, 1);
+
+        size_t required_shm_size_video = sizeof(SHMControlBlock) + (c->frame_buffer_size_video * NUM_BUFFERS);
+        c->shm_fd_video = shm_open(header.shm_file_video, O_RDWR | O_CREAT, 0666);
+        if (c->shm_fd_video < 0) {
+            av_log(s, AV_LOG_ERROR, "Failed to create video shared memory '%s': %s\n", header.shm_file_video, strerror(errno));
+            return AVERROR(errno);
+        }
+        if (ftruncate(c->shm_fd_video, required_shm_size_video) != 0) {
+            close(c->shm_fd_video);
+            shm_unlink(header.shm_file_video);
+            return AVERROR(errno);
+        }
+        c->buffer_size_video = required_shm_size_video;
+        c->buffer_video = mmap(NULL, c->buffer_size_video, PROT_READ | PROT_WRITE, MAP_SHARED, c->shm_fd_video, 0);
+        if (c->buffer_video == MAP_FAILED) {
+            close(c->shm_fd_video);
+            shm_unlink(header.shm_file_video);
+            return AVERROR(errno);
+        }
+        c->control_block_video = (SHMControlBlock*)c->buffer_video;
+        c->control_block_video->num_buffers = NUM_BUFFERS;
+        c->control_block_video->eof = 0;
+        c->write_index_video = 0;
+        for(int i=0; i < NUM_BUFFERS; i++) {
+            c->frame_buffers_video[i] = c->buffer_video + sizeof(SHMControlBlock) + (i * c->frame_buffer_size_video);
+        }
+
+        c->empty_sem_video = sem_open(header.empty_sem_name_video, O_CREAT, 0666, NUM_BUFFERS);
+        c->full_sem_video = sem_open(header.full_sem_name_video, O_CREAT, 0666, 0);
+    }
+    
+    // Audio setup
+    if (st_audio) {
+        snprintf(header.shm_file_audio, sizeof(header.shm_file_audio), "/goshadertoy_audio_%d", pid);
+        snprintf(header.empty_sem_name_audio, sizeof(header.empty_sem_name_audio), "goshadertoy_audio_empty_%d", pid);
+        snprintf(header.full_sem_name_audio, sizeof(header.full_sem_name_audio), "goshadertoy_audio_full_%d", pid);
+
+        header.sample_rate = st_audio->codecpar->sample_rate;
+        header.channels = st_audio->codecpar->ch_layout.nb_channels;
+        header.bit_depth = av_get_bytes_per_sample(st_audio->codecpar->format) * 8;
+        c->frame_buffer_size_audio = c->samples_per_buffer * header.channels * (header.bit_depth / 8);
+
+        c->internal_buffer_size_audio = c->frame_buffer_size_audio * 2;
+        c->internal_buffer_audio = av_malloc(c->internal_buffer_size_audio);
+        if (!c->internal_buffer_audio) {
+            return AVERROR(ENOMEM);
+        }
+        c->internal_buffer_occupancy_audio = 0;
+
+        size_t required_shm_size_audio = sizeof(SHMControlBlock) + (c->frame_buffer_size_audio * NUM_BUFFERS);
+        c->shm_fd_audio = shm_open(header.shm_file_audio, O_RDWR | O_CREAT, 0666);
+        if (c->shm_fd_audio < 0) {
+            av_log(s, AV_LOG_ERROR, "Failed to create audio shared memory '%s': %s\n", header.shm_file_audio, strerror(errno));
+            return AVERROR(errno);
+        }
+        if (ftruncate(c->shm_fd_audio, required_shm_size_audio) != 0) {
+            close(c->shm_fd_audio);
+            shm_unlink(header.shm_file_audio);
+            return AVERROR(errno);
+        }
+        c->buffer_size_audio = required_shm_size_audio;
+        c->buffer_audio = mmap(NULL, c->buffer_size_audio, PROT_READ | PROT_WRITE, MAP_SHARED, c->shm_fd_audio, 0);
+        if (c->buffer_audio == MAP_FAILED) {
+            close(c->shm_fd_audio);
+            shm_unlink(header.shm_file_audio);
+            return AVERROR(errno);
+        }
+        c->control_block_audio = (SHMControlBlock*)c->buffer_audio;
+        c->control_block_audio->num_buffers = NUM_BUFFERS;
+        c->control_block_audio->eof = 0;
+        c->write_index_audio = 0;
+        for(int i=0; i < NUM_BUFFERS; i++) {
+            c->frame_buffers_audio[i] = c->buffer_audio + sizeof(SHMControlBlock) + (i * c->frame_buffer_size_audio);
+        }
+        
+        c->empty_sem_audio = sem_open(header.empty_sem_name_audio, O_CREAT, 0666, NUM_BUFFERS);
+        c->full_sem_audio = sem_open(header.full_sem_name_audio, O_CREAT, 0666, 0);
+    }
+    
     avio_write(s->pb, (uint8_t*)&header, sizeof(header));
     avio_flush(s->pb);
-
-    required_shm_size = sizeof(SHMControlBlock) + (c->frame_buffer_size * NUM_BUFFERS);
-
-    c->shm_fd = shm_open(c->shm_name, O_RDWR | O_CREAT, 0666);
-    if (c->shm_fd < 0) {
-        av_log(s, AV_LOG_ERROR, "Failed to create shared memory '%s': %s\n", c->shm_name, strerror(errno));
-        return AVERROR(errno);
-    }
-
-    c->empty_sem = sem_open(c->empty_sem_name, O_CREAT, 0666, NUM_BUFFERS);
-    if (c->empty_sem == SEM_FAILED) {
-        av_log(s, AV_LOG_ERROR, "Failed to create empty semaphore '%s': %s\n", c->empty_sem_name, strerror(errno));
-        close(c->shm_fd);
-        shm_unlink(c->shm_name);
-        return AVERROR(errno);
-    }
-
-    c->full_sem = sem_open(c->full_sem_name, O_CREAT, 0666, 0);
-    if (c->full_sem == SEM_FAILED) {
-        av_log(s, AV_LOG_ERROR, "Failed to create full semaphore '%s': %s\n", c->full_sem_name, strerror(errno));
-        close(c->shm_fd);
-        shm_unlink(c->shm_name);
-        sem_close(c->empty_sem);
-        sem_unlink(c->empty_sem_name);
-        return AVERROR(errno);
-    }
-
-    if (ftruncate(c->shm_fd, required_shm_size) != 0) {
-        close(c->shm_fd);
-        shm_unlink(c->shm_name);
-        return AVERROR(errno);
-    }
-    c->buffer_size = required_shm_size;
-
-    c->buffer = mmap(NULL, c->buffer_size, PROT_READ | PROT_WRITE, MAP_SHARED, c->shm_fd, 0);
-    if (c->buffer == MAP_FAILED) {
-        close(c->shm_fd);
-        shm_unlink(c->shm_name);
-        return AVERROR(errno);
-    }
-
-    c->control_block = (SHMControlBlock*)c->buffer;
-    c->control_block->num_buffers = NUM_BUFFERS;
-    c->control_block->eof = 0;
-    c->write_index = 0;
-
-    for(int i=0; i < NUM_BUFFERS; i++) {
-        c->frame_buffers[i] = c->buffer + sizeof(SHMControlBlock) + (i * c->frame_buffer_size);
-    }
-
-    av_log(s, AV_LOG_INFO, "SHM muxer header written. SHM '%s' created (size %d), frame buffer size %zu.\n", c->shm_name, c->buffer_size, c->frame_buffer_size);
-
+    
     return 0;
 }
 
 // write_packet: Called for each packet to be written
 static int shm_write_packet(AVFormatContext *s, AVPacket *pkt) {
     SHMMuxerContext *c = s->priv_data;
+    FrameHeader frame_header = {0};
+    AVStream *st = s->streams[pkt->stream_index];
 
-    if (c->internal_buffer_occupancy + pkt->size > c->internal_buffer_size) {
-        av_log(s, AV_LOG_ERROR, "Internal muxer buffer overflow! Dropping data.\n");
-        return 0;
-    }
+    if (st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+        if (sem_wait(c->empty_sem_video) < 0) return AVERROR(errno);
 
-    memcpy(c->internal_buffer + c->internal_buffer_occupancy, pkt->data, pkt->size);
-    c->internal_buffer_occupancy += pkt->size;
+        uint8_t *write_buffer = c->frame_buffers_video[c->write_index_video];
+        memcpy(write_buffer, pkt->data, pkt->size);
+        
+        frame_header.cmdtype = 0;
+        frame_header.size = pkt->size;
+        frame_header.pts = pkt->pts;
+        frame_header.offset = write_buffer - c->buffer_video;
 
-    while (c->internal_buffer_occupancy >= c->frame_buffer_size) {
-        int ret = write_full_frame(s);
-        if (ret < 0) {
-            return ret;
+        avio_write(s->pb, (uint8_t*)&frame_header, sizeof(frame_header));
+        avio_flush(s->pb);
+        
+        c->write_index_video = (c->write_index_video + 1) % NUM_BUFFERS;
+        if (sem_post(c->full_sem_video) < 0) return AVERROR(errno);
+    } else if (st->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
+        if (c->internal_buffer_occupancy_audio + pkt->size > c->internal_buffer_size_audio) {
+            av_log(s, AV_LOG_ERROR, "Internal audio buffer overflow! Dropping data.\n");
+            return 0;
+        }
+
+        memcpy(c->internal_buffer_audio + c->internal_buffer_occupancy_audio, pkt->data, pkt->size);
+        c->internal_buffer_occupancy_audio += pkt->size;
+
+        while (c->internal_buffer_occupancy_audio >= c->frame_buffer_size_audio) {
+            int ret = write_full_audio_frame(s);
+            if (ret < 0) {
+                return ret;
+            }
         }
     }
-
+    
     return 0;
 }
 
 static int shm_write_trailer(AVFormatContext *s) {
     SHMMuxerContext *c = s->priv_data;
-    
-    // Flush any remaining data in the internal buffer by padding it with silence
-    if (c->internal_buffer_occupancy > 0) {
-        int padding_size = c->frame_buffer_size - c->internal_buffer_occupancy;
-        memset(c->internal_buffer + c->internal_buffer_occupancy, 0, padding_size);
-        c->internal_buffer_occupancy += padding_size;
-        write_full_frame(s);
+    if (c->control_block_video) c->control_block_video->eof = 1;
+    if (c->control_block_audio) {
+        if (c->internal_buffer_occupancy_audio > 0) {
+            int padding_size = c->frame_buffer_size_audio - c->internal_buffer_occupancy_audio;
+            memset(c->internal_buffer_audio + c->internal_buffer_occupancy_audio, 0, padding_size);
+            c->internal_buffer_occupancy_audio += padding_size;
+            write_full_audio_frame(s);
+        }
+        c->control_block_audio->eof = 1;
     }
-
-    c->control_block->eof = 1;
 
     FrameHeader eof_header = { .cmdtype = 2 };
     avio_write(s->pb, (uint8_t*)&eof_header, sizeof(eof_header));
     avio_flush(s->pb);
     
-    // Cleanup
-    av_free(c->internal_buffer);
-    munmap(c->buffer, c->buffer_size);
-    close(c->shm_fd);
-    shm_unlink(c->shm_name);
+    // Cleanup video resources
+    if (c->buffer_video) munmap(c->buffer_video, c->buffer_size_video);
+    if (c->shm_fd_video > 0) close(c->shm_fd_video);
+    // shm_unlink for video should be here
+    
+    // Cleanup audio resources
+    if (c->internal_buffer_audio) av_free(c->internal_buffer_audio);
+    if (c->buffer_audio) munmap(c->buffer_audio, c->buffer_size_audio);
+    if (c->shm_fd_audio > 0) close(c->shm_fd_audio);
+    // shm_unlink for audio should be here
 
-    if (c->empty_sem != SEM_FAILED) {
-        sem_close(c->empty_sem);
-        sem_unlink(c->empty_sem_name);
+    // Close and unlink semaphores
+    if (c->empty_sem_video != SEM_FAILED) {
+        sem_close(c->empty_sem_video);
+        // sem_unlink for video empty
     }
-    if (c->full_sem != SEM_FAILED) {
-        sem_close(c->full_sem);
-        sem_unlink(c->full_sem_name);
+    if (c->full_sem_video != SEM_FAILED) {
+        sem_close(c->full_sem_video);
+        // sem_unlink for video full
+    }
+    if (c->empty_sem_audio != SEM_FAILED) {
+        sem_close(c->empty_sem_audio);
+        // sem_unlink for audio empty
+    }
+    if (c->full_sem_audio != SEM_FAILED) {
+        sem_close(c->full_sem_audio);
+        // sem_unlink for audio full
     }
     return 0;
 }
@@ -274,7 +328,7 @@ const FFOutputFormat ff_shm_muxer = {
         .long_name      = "Shared Memory Muxer",
         .priv_class     = &shm_muxer_class,
         .audio_codec    = AV_CODEC_ID_PCM_F32LE,
-        .video_codec    = AV_CODEC_ID_NONE,
+        .video_codec    = AV_CODEC_ID_RAWVIDEO,
     },
     .priv_data_size = sizeof(SHMMuxerContext),
     .write_header   = shm_write_header,
