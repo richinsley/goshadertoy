@@ -9,11 +9,14 @@ import (
 	"strings"
 
 	api "github.com/richinsley/goshadertoy/api"
+	arcana "github.com/richinsley/goshadertoy/arcana"
 	options "github.com/richinsley/goshadertoy/options"
 	renderer "github.com/richinsley/goshadertoy/renderer"
 )
 
 func runShadertoy(shaderArgs *api.ShaderArgs, options *options.ShaderOptions) {
+	arcana.Init() // Initialize Arcana for FFmpeg support
+
 	// Initialize renderer
 	// If recording, the window will be hidden (headless mode)
 	mode := *options.Mode
