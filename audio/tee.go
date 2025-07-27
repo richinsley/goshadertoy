@@ -1,5 +1,7 @@
 package audio
 
+import "log"
+
 // Tee creates a fan-out from a single input channel to multiple output channels,
 // broadcasting every value from the input to all outputs. This function is a
 // fundamental concurrency pattern used when multiple, independent consumers
@@ -19,6 +21,7 @@ package audio
 // for distributing each value to all registered `outputs`.
 //
 // Key features of this implementation:
+//
 //  1. **Single Reader, Multiple Writers:** A single goroutine reads from `input`
 //     and writes to all `outputs`, preventing race conditions on the input.
 //
@@ -36,10 +39,14 @@ package audio
 //  4. **Graceful Shutdown:** When the `input` channel is closed, the `for...range`
 //     loop terminates. The function then closes all `output` channels, cleanly
 //     signaling the end of the stream to all downstream consumers.
+//
+//  5. **Error Handling:** If an output channel is closed while trying to send data,
+//     the send operation will panic. This is caught by a deferred `recover` call,
+//     which logs a warning instead of crashing the entire program. This allows the
+//     broadcast to continue to other outputs even if one consumer is no longer
+//     available.
 func Tee(input <-chan []float32, outputs ...chan<- []float32) {
-	// A single goroutine reads from the input and writes to all outputs.
 	go func() {
-		// When the input channel is closed, this loop will terminate.
 		for data := range input {
 			// Create a copy of the data slice to ensure each consumer
 			// gets its own independent version. This prevents race conditions
@@ -47,18 +54,29 @@ func Tee(input <-chan []float32, outputs ...chan<- []float32) {
 			dataCopy := make([]float32, len(data))
 			copy(dataCopy, data)
 
-			// Send the data copy to every output channel.
 			for _, out := range outputs {
-				// This send will block until the consumer is ready to receive.
-				// This provides natural backpressure.
-				out <- dataCopy
+				// Use an anonymous function to isolate the recover
+				func(ch chan<- []float32, data []float32) {
+					defer func() {
+						if r := recover(); r != nil {
+							log.Printf("Warning: Cannot send to output channel (closed): %v", r)
+						}
+					}()
+					// This send will block until the consumer is ready to receive.
+					// This provides natural backpressure.
+					ch <- data
+				}(out, dataCopy)
 			}
 		}
 
-		// Once the input channel is closed, close all the output channels
-		// to signal completion to the consumers.
+		// Close all outputs, ignoring panics from already-closed channels
 		for _, out := range outputs {
-			close(out)
+			func(ch chan<- []float32) {
+				defer func() {
+					recover() // Ignore panic if already closed
+				}()
+				close(ch)
+			}(out)
 		}
 	}()
 }

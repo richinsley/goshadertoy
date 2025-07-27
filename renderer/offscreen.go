@@ -209,6 +209,7 @@ func (r *Renderer) getArgs(options *options.ShaderOptions, ffmpegOutPixFmt strin
 	switch runtime.GOOS {
 	case "linux":
 		log.Println("Using Linux (NVENC) hardware acceleration.")
+		// use cuda for color conversion
 		outputArgs["vf"] = fmt.Sprintf("hwupload_cuda,scale_cuda=format=%s", ffmpegOutPixFmt)
 		if *options.Codec == "hevc" {
 			outputArgs["c:v"] = "hevc_nvenc"
@@ -224,12 +225,14 @@ func (r *Renderer) getArgs(options *options.ShaderOptions, ffmpegOutPixFmt strin
 		} else {
 			outputArgs["c:v"] = "h264_videotoolbox"
 		}
+		outputArgs["pix_fmt"] = ffmpegOutPixFmt
 	default:
 		log.Println("Using software encoding pipeline (no hardware acceleration).")
 		if *options.Codec == "hevc" {
 			outputArgs["c:v"] = "libx265"
 		} else {
 			outputArgs["c:v"] = "libx264"
+			outputArgs["pix_fmt"] = ffmpegOutPixFmt
 		}
 	}
 

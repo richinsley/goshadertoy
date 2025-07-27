@@ -206,16 +206,16 @@ func (p *AudioPlayer) writeFullFrameToSHM(writeIndex *uint32, pts *int64) error 
 
 // runProducer is the loop that takes audio data, buffers it, and writes full frames to shared memory.
 func (p *AudioPlayer) runProducer(input <-chan []float32) {
-	defer func() {
-		if p.pipeWriter != nil {
-			controlBlockPtr := (*C.SHMControlBlock)(p.shm.GetPtr())
-			controlBlockPtr.eof = 1
-			eofHeader := C.FrameHeader{cmdtype: C.uint32_t(2)}
-			eofHeaderBytes := (*[unsafe.Sizeof(eofHeader)]byte)(unsafe.Pointer(&eofHeader))[:]
-			p.pipeWriter.Write(eofHeaderBytes)
-			p.pipeWriter.Close()
-		}
-	}()
+	// defer func() {
+	// 	if p.pipeWriter != nil {
+	// 		controlBlockPtr := (*C.SHMControlBlock)(p.shm.GetPtr())
+	// 		controlBlockPtr.eof = 1
+	// 		eofHeader := C.FrameHeader{cmdtype: C.uint32_t(2)}
+	// 		eofHeaderBytes := (*[unsafe.Sizeof(eofHeader)]byte)(unsafe.Pointer(&eofHeader))[:]
+	// 		p.pipeWriter.Write(eofHeaderBytes)
+	// 		p.pipeWriter.Close()
+	// 	}
+	// }()
 
 	controlBlockPtr := (*C.SHMControlBlock)(p.shm.GetPtr())
 	controlBlockPtr.num_buffers = numAudioBuffers
@@ -280,7 +280,8 @@ func (p *AudioPlayer) Stop() error {
 	}
 
 	if p.cmd != nil && p.cmd.Process != nil {
-		return p.cmd.Process.Kill()
+		cmd := exec.Command("kill", "-KILL", fmt.Sprintf("%d", p.cmd.Process.Pid))
+		return cmd.Run()
 	}
 	return nil
 }
