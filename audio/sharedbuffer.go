@@ -4,212 +4,157 @@ import (
 	"sync"
 )
 
-// SharedAudioBuffer now uses a queue of buffers internally but maintains the same API
+// SharedAudioBuffer provides a thread-safe, buffered audio queue.
 type SharedAudioBuffer struct {
-	mu             sync.RWMutex
-	buffers        [][]float32
-	maxBuffers     int
-	totalWritten   int64
-	droppedSamples int64
-	currentReadBuf []float32 // Current buffer being read from
-	readOffset     int       // Offset within current read buffer
+	mu               sync.RWMutex
+	buffers          [][]float32
+	maxBuffers       int
+	totalWritten     int64
+	droppedSamples   int64
+	availableSamples int // This will now be updated correctly
+	spaceChan        chan struct{}
+
+	// Window for non-destructive peeking (for FFT)
+	windowMu    sync.RWMutex
+	windowSize  int
+	writeWindow []float32
+	readWindow  []float32
+	writePos    int
 }
 
-func NewSharedAudioBuffer(capacity int) *SharedAudioBuffer {
-	// Convert capacity to number of buffers (assuming ~1024 samples per buffer)
-	// You can adjust this ratio based on your typical buffer sizes
-	maxBuffers := max(capacity/1024, 10)
+const DefaultWindowSize = 2048
 
+// NewSharedAudioBuffer creates a new buffer.
+func NewSharedAudioBuffer(capacity int) *SharedAudioBuffer {
+	maxBuffers := max(capacity/1024, 20)
 	return &SharedAudioBuffer{
-		buffers:    make([][]float32, 0, maxBuffers),
-		maxBuffers: maxBuffers,
+		buffers:          make([][]float32, 0, maxBuffers),
+		maxBuffers:       maxBuffers,
+		availableSamples: 0,
+		spaceChan:        make(chan struct{}, maxBuffers),
+		windowSize:       DefaultWindowSize,
+		writeWindow:      make([]float32, DefaultWindowSize),
+		readWindow:       make([]float32, DefaultWindowSize),
+		writePos:         0,
 	}
 }
 
-// Write adds new samples to the buffer queue, dropping oldest if necessary
-func (b *SharedAudioBuffer) Write(samples []float32) {
+// Write adds new samples to the buffer queue and updates the peek window.
+func (b *SharedAudioBuffer) Write(samples []float32, dropIfFull bool) {
+	b.updateWindow(samples) // Update the non-destructive peek window first
+
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	// Make a copy to avoid external modifications
 	bufferCopy := make([]float32, len(samples))
 	copy(bufferCopy, samples)
 
-	// If queue is full, drop the oldest buffer
 	if len(b.buffers) >= b.maxBuffers {
+		if !dropIfFull {
+			// In a real-world scenario, we might block here using b.spaceChan,
+			// but for now, we'll assume dropping is the desired behavior for overflow.
+			return
+		}
+		// Drop the oldest buffer to make space.
 		oldBuffer := b.buffers[0]
 		b.buffers = b.buffers[1:]
 		b.droppedSamples += int64(len(oldBuffer))
-
-		// If we were reading from the dropped buffer, reset read state
-		if len(b.currentReadBuf) > 0 && &b.currentReadBuf[0] == &oldBuffer[0] {
-			b.currentReadBuf = nil
-			b.readOffset = 0
-		}
+		b.availableSamples -= len(oldBuffer) // Decrement for the dropped buffer
 	}
 
 	b.buffers = append(b.buffers, bufferCopy)
 	b.totalWritten += int64(len(samples))
+	b.availableSamples += len(samples) // Increment by the number of new samples
 }
 
-// ReadLatest retrieves the most recent `count` samples from the buffer.
-func (b *SharedAudioBuffer) ReadLatest(count int) []float32 {
+// Read destructively reads the oldest 'count' samples from the buffer queue.
+// This should be used by the primary audio consumer (player/recorder).
+func (b *SharedAudioBuffer) Read(count int) []float32 {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	if count <= 0 {
+	if count <= 0 || b.availableSamples == 0 {
 		return nil
+	}
+
+	if count > b.availableSamples {
+		count = b.availableSamples
 	}
 
 	out := make([]float32, count)
 	outPos := 0
+	samplesRemainingToRead := count
 
-	// Calculate total available samples
-	totalAvailable := b.getTotalAvailableSamples()
-	if totalAvailable == 0 {
-		return out // Return silence if no data
-	}
+	// Consume from the oldest buffers first (FIFO)
+	for len(b.buffers) > 0 && samplesRemainingToRead > 0 {
+		buffer := b.buffers[0]
+		samplesToCopy := min(samplesRemainingToRead, len(buffer))
 
-	// If we want more than available, adjust count
-	if count > totalAvailable {
-		count = totalAvailable
-		out = out[:count]
-	}
+		copy(out[outPos:], buffer[:samplesToCopy])
 
-	// Start from the end and work backwards to get the "latest" samples
-	samplesNeeded := count
-	bufferIdx := len(b.buffers) - 1
-
-	// Collect samples from newest to oldest buffers
-	tempBuffers := make([][]float32, 0, len(b.buffers))
-	for bufferIdx >= 0 && samplesNeeded > 0 {
-		buffer := b.buffers[bufferIdx]
-		if len(buffer) <= samplesNeeded {
-			// Take the whole buffer
-			tempBuffers = append(tempBuffers, buffer)
-			samplesNeeded -= len(buffer)
-		} else {
-			// Take only the last part of this buffer
-			start := len(buffer) - samplesNeeded
-			tempBuffers = append(tempBuffers, buffer[start:])
-			samplesNeeded = 0
-		}
-		bufferIdx--
-	}
-
-	// Reverse the order and copy to output (since we collected backwards)
-	for i := len(tempBuffers) - 1; i >= 0; i-- {
-		copy(out[outPos:], tempBuffers[i])
-		outPos += len(tempBuffers[i])
-	}
-
-	return out
-}
-
-// ReadFrom retrieves `count` samples starting from a specific `offset` behind the current write position
-func (b *SharedAudioBuffer) ReadFrom(offset int, count int) []float32 {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	if count <= 0 {
-		return nil
-	}
-
-	out := make([]float32, count)
-	totalAvailable := b.getTotalAvailableSamples()
-
-	if offset >= totalAvailable {
-		return out // Return silence if offset is too far back
-	}
-
-	// Calculate the actual starting position
-	startPos := totalAvailable - offset
-	if startPos < 0 {
-		startPos = 0
-	}
-
-	// Adjust count if we don't have enough samples
-	availableFromStart := totalAvailable - startPos
-	if count > availableFromStart {
-		count = availableFromStart
-		out = out[:count]
-	}
-
-	// Find which buffer contains our start position
-	samplesSkipped := 0
-	bufferIdx := 0
-	offsetInBuffer := 0
-
-	for bufferIdx < len(b.buffers) {
-		bufferLen := len(b.buffers[bufferIdx])
-		if samplesSkipped+bufferLen > startPos {
-			offsetInBuffer = startPos - samplesSkipped
-			break
-		}
-		samplesSkipped += bufferLen
-		bufferIdx++
-	}
-
-	// Copy samples starting from the calculated position
-	outPos := 0
-	samplesRemaining := count
-
-	for bufferIdx < len(b.buffers) && samplesRemaining > 0 {
-		buffer := b.buffers[bufferIdx]
-		availableInBuffer := len(buffer) - offsetInBuffer
-		samplesToCopy := min(samplesRemaining, availableInBuffer)
-
-		copy(out[outPos:], buffer[offsetInBuffer:offsetInBuffer+samplesToCopy])
 		outPos += samplesToCopy
-		samplesRemaining -= samplesToCopy
+		samplesRemainingToRead -= samplesToCopy
 
-		bufferIdx++
-		offsetInBuffer = 0 // Only first buffer might have an offset
+		if samplesToCopy == len(buffer) {
+			// The entire buffer was consumed, remove it from the queue.
+			b.buffers = b.buffers[1:]
+		} else {
+			// Only part of the buffer was consumed, so we slice it to remove the read part.
+			b.buffers[0] = buffer[samplesToCopy:]
+		}
 	}
 
+	b.availableSamples -= count // Decrement by the exact number of samples read
 	return out
 }
 
-// TotalSamplesWritten returns the total number of samples that have been written to the buffer
+// AvailableSamples returns the total number of readable samples. It is now O(1).
+func (b *SharedAudioBuffer) AvailableSamples() int {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.availableSamples
+}
+
+// --- Window (Peek) Functionality ---
+
+func (b *SharedAudioBuffer) updateWindow(samples []float32) {
+	b.windowMu.Lock()
+	defer b.windowMu.Unlock()
+
+	sampleIdx := 0
+	for sampleIdx < len(samples) {
+		spaceInWindow := b.windowSize - b.writePos
+		samplesToWrite := min(len(samples)-sampleIdx, spaceInWindow)
+
+		copy(b.writeWindow[b.writePos:b.writePos+samplesToWrite], samples[sampleIdx:sampleIdx+samplesToWrite])
+		b.writePos += samplesToWrite
+		sampleIdx += samplesToWrite
+
+		if b.writePos >= b.windowSize {
+			// When the write window is full, swap it with the read window.
+			b.writeWindow, b.readWindow = b.readWindow, b.writeWindow
+			b.writePos = 0
+		}
+	}
+}
+
+// WindowPeek returns a copy of the most recent audio data for FFT analysis.
+func (b *SharedAudioBuffer) WindowPeek() []float32 {
+	b.windowMu.RLock()
+	defer b.windowMu.RUnlock()
+	result := make([]float32, b.windowSize)
+	copy(result, b.readWindow)
+	return result
+}
+
+// --- Helper functions and other accessors ---
+
 func (b *SharedAudioBuffer) TotalSamplesWritten() int64 {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	return b.totalWritten
 }
 
-// Additional methods for monitoring (optional, but useful)
-
-// QueueLength returns the number of buffers currently queued
-func (b *SharedAudioBuffer) QueueLength() int {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	return len(b.buffers)
-}
-
-// DroppedSamples returns the number of samples that have been dropped due to buffer overflow
-func (b *SharedAudioBuffer) DroppedSamples() int64 {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	return b.droppedSamples
-}
-
-// AvailableSamples returns the total number of samples currently available for reading
-func (b *SharedAudioBuffer) AvailableSamples() int {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	return b.getTotalAvailableSamples()
-}
-
-// Helper method to calculate total available samples (must be called with lock held)
-func (b *SharedAudioBuffer) getTotalAvailableSamples() int {
-	total := 0
-	for _, buffer := range b.buffers {
-		total += len(buffer)
-	}
-	return total
-}
-
-// Helper function
 func min(a, b int) int {
 	if a < b {
 		return a

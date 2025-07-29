@@ -554,7 +554,7 @@ func (r *Renderer) runStreamMode(options *options.ShaderOptions) error {
 			defer ticker.Stop()
 
 			for range ticker.C {
-				samples := r.audioDevice.GetBuffer().ReadLatest(samplesPerFrame)
+				samples := r.audioDevice.GetBuffer().Read(samplesPerFrame)
 				if len(samples) > 0 {
 					audioChan <- samples
 				}
@@ -661,11 +661,14 @@ func (r *Renderer) runRecordMode(options *options.ShaderOptions) error {
 		if hasAudio {
 			// 1. Ensure enough audio is decoded for the current frame
 			targetSample := int64((currentTime + timeStep) * float64(sampleRate))
-			r.audioDevice.DecodeUntil(targetSample)
+			available := r.audioDevice.GetBuffer().AvailableSamples()
+			if samplesPerFrame > int(available) {
+				r.audioDevice.DecodeUntil(targetSample)
+			}
 
 			// 2. Pull the stereo audio for this frame from the buffer
 			// The number of stereo samples is samplesPerFrame, so the slice length is *2
-			stereoSamples := r.audioDevice.GetBuffer().ReadLatest(samplesPerFrame * 2)
+			stereoSamples := r.audioDevice.GetBuffer().Read(samplesPerFrame * 2)
 
 			// 3. Send the stereo audio to the encoder
 			if len(stereoSamples) > 0 {
@@ -674,15 +677,7 @@ func (r *Renderer) runRecordMode(options *options.ShaderOptions) error {
 
 			// 4. If there's a mic channel, downmix and process the audio for FFT
 			if micChannel != nil {
-				// We need the last 2048 mono samples. Let's take the last 4096 stereo samples to be safe.
-				const stereoFFTSize = 2048 * 2
-				var fftStereoChunk []float32
-				if len(stereoSamples) > stereoFFTSize {
-					fftStereoChunk = stereoSamples[len(stereoSamples)-stereoFFTSize:]
-				} else {
-					fftStereoChunk = stereoSamples
-				}
-
+				fftStereoChunk := r.audioDevice.GetBuffer().WindowPeek()
 				monoSamples := audio.DownmixStereoToMono(fftStereoChunk)
 				micChannel.ProcessAudio(monoSamples)
 			}

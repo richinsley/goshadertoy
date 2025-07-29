@@ -168,7 +168,7 @@ func (p *AudioPlayer) runOutputLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 			// Pull data from the shared buffer
-			frameData := p.buffer.ReadLatest(outputFrameSize)
+			frameData := p.buffer.Read(outputFrameSize)
 			p.internalBuffer = append(p.internalBuffer, frameData...)
 		}
 

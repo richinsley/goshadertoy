@@ -367,7 +367,7 @@ func (r *Renderer) Run() {
 			// Get the latest audio samples for FFT.
 			// Read enough samples to fill the FFT input size.
 			const fftInputSize = 2048 // From inputs/mic.go
-			samples := r.audioDevice.GetBuffer().ReadLatest(fftInputSize)
+			samples := r.audioDevice.GetBuffer().WindowPeek()
 			monoSamples := audio.DownmixStereoToMono(samples)
 			micChannel.ProcessAudio(monoSamples)
 		}

@@ -259,28 +259,60 @@ func (d *ffmpegBaseDevice) DecodeUntil(targetSample int64) error {
 }
 
 func (d *ffmpegBaseDevice) resampleAndBuffer(frame *C.AVFrame) {
+	// Get the estimated output sample count from SWR context
+	estimatedOutputSamples := C.swr_get_out_samples(d.swrCtx, frame.nb_samples)
+	if estimatedOutputSamples < 0 {
+		log.Printf("Error: Could not estimate output samples: %d", estimatedOutputSamples)
+		return
+	}
+
+	// Add a small buffer for safety (SWR might produce slightly more due to filtering)
+	maxOutputSamples := estimatedOutputSamples + 32
+
 	resampledFrame := C.av_frame_alloc()
 	defer C.av_frame_free(&resampledFrame)
 
 	resampledFrame.sample_rate = C.int(d.sampleRate)
 	C.av_channel_layout_copy(&resampledFrame.ch_layout, &d.outChLayout)
 	resampledFrame.format = C.AV_SAMPLE_FMT_FLT
-	resampledFrame.nb_samples = C.int(C.av_rescale_rnd(C.int64_t(frame.nb_samples), C.int64_t(d.sampleRate), C.int64_t(frame.sample_rate), C.AV_ROUND_UP))
+	resampledFrame.nb_samples = maxOutputSamples
 
 	if C.av_frame_get_buffer(resampledFrame, 0) < 0 {
 		log.Println("Error: Could not allocate buffer for resampled frame")
 		return
 	}
 
-	C.swr_convert(d.swrCtx, &resampledFrame.data[0], resampledFrame.nb_samples, &frame.data[0], frame.nb_samples)
+	// Perform the actual resampling conversion
+	actualOutputSamples := C.swr_convert(
+		d.swrCtx,
+		&resampledFrame.data[0],
+		maxOutputSamples,
+		&frame.data[0],
+		frame.nb_samples,
+	)
 
-	numSamples := int(resampledFrame.nb_samples)
+	if actualOutputSamples < 0 {
+		log.Printf("Error: swr_convert failed: %d", actualOutputSamples)
+		return
+	}
+
+	if actualOutputSamples == 0 {
+		// No output samples produced (this can happen with some filters)
+		return
+	}
+
+	// Use the actual number of samples produced by swr_convert
+	numSamples := int(actualOutputSamples)
 	numChannels := int(d.outChLayout.nb_channels)
-	goSlice := (*[1 << 30]float32)(unsafe.Pointer(resampledFrame.data[0]))[:numSamples*numChannels]
-	dataCopy := make([]float32, len(goSlice))
+
+	// Create Go slice from the actual samples produced
+	totalFloats := numSamples * numChannels
+	goSlice := (*[1 << 30]float32)(unsafe.Pointer(resampledFrame.data[0]))[:totalFloats]
+	dataCopy := make([]float32, totalFloats)
 	copy(dataCopy, goSlice)
 
-	d.buffer.Write(dataCopy)
+	// Write to buffer and update sample count
+	d.buffer.Write(dataCopy, false)
 	d.samplesSent += int64(numSamples)
 }
 
