@@ -9,6 +9,7 @@ import (
 
 	gl "github.com/go-gl/gl/v4.1-core/gl"
 	api "github.com/richinsley/goshadertoy/api"
+	audio "github.com/richinsley/goshadertoy/audio"
 	inputs "github.com/richinsley/goshadertoy/inputs"
 	options "github.com/richinsley/goshadertoy/options"
 	shader "github.com/richinsley/goshadertoy/shader"
@@ -295,6 +296,7 @@ func (r *Renderer) Run() {
 	var lastMouseClickX, lastMouseClickY float64
 	var mouseWasDown bool
 	var lastFrameTime = r.context.Time()
+	micChannel := findMicChannel(r) // Helper to find the mic channel instance
 
 	for !r.context.ShouldClose() {
 		currentTime := r.context.Time() - startTime
@@ -359,6 +361,15 @@ func (r *Renderer) Run() {
 			ChannelTime:       [4]float32{float32(currentTime), float32(currentTime), float32(currentTime), float32(currentTime)},
 			SampleRate:        sampleRate,
 			ChannelResolution: channelResolutions,
+		}
+
+		if micChannel != nil {
+			// Get the latest audio samples for FFT.
+			// Read enough samples to fill the FFT input size.
+			const fftInputSize = 2048 // From inputs/mic.go
+			samples := r.audioDevice.GetBuffer().ReadLatest(fftInputSize)
+			monoSamples := audio.DownmixStereoToMono(samples)
+			micChannel.ProcessAudio(monoSamples)
 		}
 
 		r.RenderFrame(currentTime, frameCount, mouseData, uniforms)
