@@ -14,11 +14,11 @@ type FFmpegDeviceInput struct {
 }
 
 // NewFFmpegDeviceInput creates a new audio device that captures from a live device.
-func NewFFmpegDeviceInput(options *options.ShaderOptions) (*FFmpegDeviceInput, error) {
+func NewFFmpegDeviceInput(options *options.ShaderOptions, buffer *SharedAudioBuffer) (*FFmpegDeviceInput, error) {
 	d := &FFmpegDeviceInput{
 		ffmpegBaseDevice: ffmpegBaseDevice{
-			options:  options,
-			stopChan: make(chan struct{}),
+			options: options,
+			buffer:  buffer,
 		},
 	}
 
@@ -33,7 +33,7 @@ func NewFFmpegDeviceInput(options *options.ShaderOptions) (*FFmpegDeviceInput, e
 }
 
 // Start configures FFmpeg to capture from a live device and starts the process.
-func (d *FFmpegDeviceInput) Start() (<-chan []float32, error) {
+func (d *FFmpegDeviceInput) Start() error {
 	log.Println("Initializing FFmpeg for device input...")
 	var format string
 	inputOptions := map[string]string{"fflags": "nobuffer"}
@@ -48,9 +48,9 @@ func (d *FFmpegDeviceInput) Start() (<-chan []float32, error) {
 	}
 
 	// Rate emulation is never needed for live device capture.
-	err := d.init(*d.options.AudioInputDevice, format, "mono", false, inputOptions)
+	err := d.init(*d.options.AudioInputDevice, format, "stereo", false, inputOptions)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	return d.start()
+	return d.ffmpegBaseDevice.Start()
 }

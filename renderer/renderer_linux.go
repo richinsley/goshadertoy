@@ -7,6 +7,7 @@ import (
 	"runtime"
 
 	gl "github.com/go-gl/gl/v4.1-core/gl"
+	"github.com/richinsley/goshadertoy/audio"
 	glfwcontext "github.com/richinsley/goshadertoy/glfwcontext"
 	headless "github.com/richinsley/goshadertoy/headless"
 	inputs "github.com/richinsley/goshadertoy/inputs"
@@ -27,13 +28,15 @@ type Renderer struct {
 	width             int
 	height            int
 	recordMode        bool
+	audioDevice       audio.AudioDevice
 }
 
-func NewRenderer(width, height int, visible bool, bitDepth int, numPBOs int) (*Renderer, error) {
+func NewRenderer(width, height int, visible bool, bitDepth int, numPBOs int, ad audio.AudioDevice) (*Renderer, error) {
 	r := &Renderer{
-		width:      width,
-		height:     height,
-		recordMode: !visible,
+		width:       width,
+		height:      height,
+		recordMode:  !visible,
+		audioDevice: ad,
 	}
 	var err error
 

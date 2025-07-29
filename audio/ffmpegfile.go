@@ -13,11 +13,11 @@ type FFmpegFileInput struct {
 }
 
 // NewFFmpegFileInput creates a new audio device that reads from a file.
-func NewFFmpegFileInput(options *options.ShaderOptions) (*FFmpegFileInput, error) {
+func NewFFmpegFileInput(options *options.ShaderOptions, buffer *SharedAudioBuffer) (*FFmpegFileInput, error) {
 	d := &FFmpegFileInput{
 		ffmpegBaseDevice: ffmpegBaseDevice{
-			options:  options,
-			stopChan: make(chan struct{}),
+			options: options,
+			buffer:  buffer,
 		},
 	}
 	if *options.AudioOutputDevice != "" {
@@ -31,7 +31,7 @@ func NewFFmpegFileInput(options *options.ShaderOptions) (*FFmpegFileInput, error
 }
 
 // Start configures FFmpeg to read from a file and starts the audio capture.
-func (d *FFmpegFileInput) Start() (<-chan []float32, error) {
+func (d *FFmpegFileInput) Start() error {
 	log.Println("Initializing FFmpeg for file input...")
 
 	// Rate emulation should only be enabled when treating the file as a live source.
@@ -44,9 +44,9 @@ func (d *FFmpegFileInput) Start() (<-chan []float32, error) {
 	// For file inputs, we don't need any special options like "re" anymore.
 	inputOptions := make(map[string]string)
 
-	err := d.init(*d.options.AudioInputFile, "", "mono", enableRateEmulation, inputOptions)
+	err := d.init(*d.options.AudioInputFile, "", "stereo", enableRateEmulation, inputOptions)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	return d.start()
+	return d.ffmpegBaseDevice.Start()
 }

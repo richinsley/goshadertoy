@@ -2,8 +2,10 @@
 package audio
 
 import (
+	"context"
 	"fmt"
 	"log"
+	"sync"
 	"time"
 	"unsafe"
 
@@ -49,10 +51,15 @@ type ffmpegBaseDevice struct {
 	enableRateEmulation bool
 	startTime           time.Time
 	samplesSent         int64
+	buffer              *SharedAudioBuffer
+	cancel              context.CancelFunc
+	mode                string
+	decodeLock          sync.Mutex // To protect decoding resources in passive mode
 }
 
 // init initializes the FFmpeg libraries and sets up the decoding pipeline.
 func (d *ffmpegBaseDevice) init(input, format, channelLayout string, enableRateEmulation bool, inputOptions map[string]string) error {
+	d.mode = *d.options.Mode
 	d.enableRateEmulation = enableRateEmulation
 
 	// Open Input
@@ -126,7 +133,7 @@ func (d *ffmpegBaseDevice) init(input, format, channelLayout string, enableRateE
 	// Setup Resampler
 	d.sampleRate = int(d.codecCtx.sample_rate)
 
-	cLayoutStr := C.CString(channelLayout)
+	cLayoutStr := C.CString(channelLayout) // Use the passed-in channel layout
 	defer C.free(unsafe.Pointer(cLayoutStr))
 	if C.get_ch_layout_from_string(&d.outChLayout, cLayoutStr) != 0 {
 		d.cleanup()
@@ -147,39 +154,36 @@ func (d *ffmpegBaseDevice) init(input, format, channelLayout string, enableRateE
 }
 
 // start begins the audio processing loop.
-func (d *ffmpegBaseDevice) start() (<-chan []float32, error) {
-	d.audioChan = make(chan []float32, 16)
-	d.isStreaming = true
+func (d *ffmpegBaseDevice) Start() error {
+	var ctx context.Context
+	ctx, d.cancel = context.WithCancel(context.Background())
 
-	go d.runAudioLoop(d.audioChan)
-
-	if d.player != nil {
-		playerChan := make(chan []float32, 16)
-		d.player.Start(playerChan)
-		Tee(d.audioChan, playerChan)
+	// Only start the active decoding goroutine for real-time modes.
+	if d.mode == "live" || d.mode == "stream" {
+		go d.runAudioLoop(ctx)
 	}
 
-	return d.audioChan, nil
+	if d.player != nil {
+		d.player.Start(d.buffer)
+	}
+	return nil
 }
 
-// runAudioLoop is the main decoding and resampling loop.
-func (d *ffmpegBaseDevice) runAudioLoop(output chan<- []float32) {
+// runAudioLoop is the active decoding loop for live/stream modes.
+func (d *ffmpegBaseDevice) runAudioLoop(ctx context.Context) {
 	defer d.cleanup()
-	defer close(output)
 
 	packet := C.av_packet_alloc()
 	defer C.av_packet_free(&packet)
 	frame := C.av_frame_alloc()
 	defer C.av_frame_free(&frame)
-	resampledFrame := C.av_frame_alloc()
-	defer C.av_frame_free(&resampledFrame)
 
 	d.startTime = time.Now()
-	d.samplesSent = 0
+	// d.samplesSent is already initialized to 0
 
 	for {
 		select {
-		case <-d.stopChan:
+		case <-ctx.Done():
 			return
 		default:
 			if C.av_read_frame(d.formatCtx, packet) < 0 {
@@ -193,50 +197,91 @@ func (d *ffmpegBaseDevice) runAudioLoop(output chan<- []float32) {
 				}
 
 				for C.avcodec_receive_frame(d.codecCtx, frame) == 0 {
-					// 1. Set the properties for the output frame
-					resampledFrame.sample_rate = C.int(d.sampleRate)
-					resampledFrame.ch_layout = d.outChLayout
-					resampledFrame.format = C.AV_SAMPLE_FMT_FLT
-					// 2. Calculate the number of output samples needed
-					resampledFrame.nb_samples = C.int(C.av_rescale_rnd(C.int64_t(frame.nb_samples), C.int64_t(d.sampleRate), C.int64_t(frame.sample_rate), C.AV_ROUND_UP))
-
-					// 3. Allocate the buffer for the output frame
-					if C.av_frame_get_buffer(resampledFrame, 0) < 0 {
-						log.Println("Error: Could not allocate buffer for resampled frame")
-						C.av_frame_unref(frame)
-						continue
-					}
-
-					// 4. Perform the conversion
-					C.swr_convert(d.swrCtx, &resampledFrame.data[0], resampledFrame.nb_samples, &frame.data[0], frame.nb_samples)
-
-					numSamples := int(resampledFrame.nb_samples)
-					numChannels := int(d.outChLayout.nb_channels)
-
-					goSlice := (*[1 << 30]float32)(unsafe.Pointer(resampledFrame.data[0]))[: numSamples*numChannels : numSamples*numChannels]
-					dataCopy := make([]float32, len(goSlice))
-					copy(dataCopy, goSlice)
-
-					output <- dataCopy
-					d.samplesSent += int64(numSamples)
-
-					if d.enableRateEmulation {
-						elapsed := time.Since(d.startTime)
-						expectedSamples := int64(elapsed.Seconds() * float64(d.sampleRate))
-						if d.samplesSent > expectedSamples {
-							aheadSamples := d.samplesSent - expectedSamples
-							sleepDuration := time.Duration(float64(aheadSamples)*1e9/float64(d.sampleRate)) * time.Nanosecond
-							time.Sleep(sleepDuration)
-						}
-					}
-
-					C.av_frame_unref(resampledFrame)
+					d.resampleAndBuffer(frame)
 					C.av_frame_unref(frame)
 				}
 			}
 			C.av_packet_unref(packet)
+
+			// Rate emulation for file-based streaming
+			if d.enableRateEmulation {
+				elapsed := time.Since(d.startTime)
+				expectedSamples := int64(elapsed.Seconds() * float64(d.sampleRate))
+				if d.samplesSent > expectedSamples {
+					aheadSamples := d.samplesSent - expectedSamples
+					sleepDuration := time.Duration(float64(aheadSamples)*1e9/float64(d.sampleRate)) * time.Nanosecond
+					time.Sleep(sleepDuration)
+				}
+			}
 		}
 	}
+}
+
+func (d *ffmpegBaseDevice) DecodeUntil(targetSample int64) error {
+	d.decodeLock.Lock()
+	defer d.decodeLock.Unlock()
+
+	// If we've already decoded past the target, there's nothing to do.
+	if d.samplesSent >= targetSample {
+		return nil
+	}
+
+	packet := C.av_packet_alloc()
+	defer C.av_packet_free(&packet)
+	frame := C.av_frame_alloc()
+	defer C.av_frame_free(&frame)
+
+	// Keep decoding until we reach the target number of samples.
+	for d.samplesSent < targetSample {
+		if C.av_read_frame(d.formatCtx, packet) < 0 {
+			// End of file or error
+			return fmt.Errorf("EOF or read error while decoding to sample %d", targetSample)
+		}
+
+		if packet.stream_index == C.int(d.audioStream.index) {
+			if C.avcodec_send_packet(d.codecCtx, packet) < 0 {
+				C.av_packet_unref(packet)
+				continue
+			}
+
+			for C.avcodec_receive_frame(d.codecCtx, frame) == 0 {
+				d.resampleAndBuffer(frame)
+				C.av_frame_unref(frame)
+				// Break inner loop if we've passed the target, to avoid over-decoding.
+				if d.samplesSent >= targetSample {
+					break
+				}
+			}
+		}
+		C.av_packet_unref(packet)
+	}
+	return nil
+}
+
+func (d *ffmpegBaseDevice) resampleAndBuffer(frame *C.AVFrame) {
+	resampledFrame := C.av_frame_alloc()
+	defer C.av_frame_free(&resampledFrame)
+
+	resampledFrame.sample_rate = C.int(d.sampleRate)
+	C.av_channel_layout_copy(&resampledFrame.ch_layout, &d.outChLayout)
+	resampledFrame.format = C.AV_SAMPLE_FMT_FLT
+	resampledFrame.nb_samples = C.int(C.av_rescale_rnd(C.int64_t(frame.nb_samples), C.int64_t(d.sampleRate), C.int64_t(frame.sample_rate), C.AV_ROUND_UP))
+
+	if C.av_frame_get_buffer(resampledFrame, 0) < 0 {
+		log.Println("Error: Could not allocate buffer for resampled frame")
+		return
+	}
+
+	C.swr_convert(d.swrCtx, &resampledFrame.data[0], resampledFrame.nb_samples, &frame.data[0], frame.nb_samples)
+
+	numSamples := int(resampledFrame.nb_samples)
+	numChannels := int(d.outChLayout.nb_channels)
+	goSlice := (*[1 << 30]float32)(unsafe.Pointer(resampledFrame.data[0]))[:numSamples*numChannels]
+	dataCopy := make([]float32, len(goSlice))
+	copy(dataCopy, goSlice)
+
+	d.buffer.Write(dataCopy)
+	d.samplesSent += int64(numSamples)
 }
 
 // cleanup frees all allocated FFmpeg resources.
@@ -260,7 +305,9 @@ func (d *ffmpegBaseDevice) Stop() error {
 		return nil
 	}
 	d.isStreaming = false
-	close(d.stopChan)
+	if d.cancel != nil {
+		d.cancel()
+	}
 
 	if d.player != nil {
 		d.player.Stop()
@@ -271,4 +318,9 @@ func (d *ffmpegBaseDevice) Stop() error {
 // SampleRate returns the detected sample rate of the audio stream.
 func (d *ffmpegBaseDevice) SampleRate() int {
 	return d.sampleRate
+}
+
+// GetBuffer returns the shared audio buffer.
+func (d *ffmpegBaseDevice) GetBuffer() *SharedAudioBuffer {
+	return d.buffer
 }

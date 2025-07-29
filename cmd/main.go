@@ -9,7 +9,8 @@ import (
 	"strings"
 
 	api "github.com/richinsley/goshadertoy/api"
-	arcana "github.com/richinsley/goshadertoy/arcana"
+	"github.com/richinsley/goshadertoy/arcana"
+	"github.com/richinsley/goshadertoy/audio"
 	options "github.com/richinsley/goshadertoy/options"
 	renderer "github.com/richinsley/goshadertoy/renderer"
 )
@@ -17,15 +18,18 @@ import (
 func runShadertoy(shaderArgs *api.ShaderArgs, options *options.ShaderOptions) {
 	arcana.Init() // Initialize Arcana for FFmpeg support
 
-	// Initialize renderer
-	// If recording, the window will be hidden (headless mode)
-	mode := *options.Mode
-	isRecord := false
-	if mode == "record" || mode == "stream" {
-		isRecord = true
+	// Create the single audio device here.
+	audioDevice, err := audio.NewFFmpegAudioDevice(options)
+	if err != nil {
+		log.Fatalf("Failed to create audio device: %v", err)
 	}
+	defer audioDevice.Stop()
 
-	r, err := renderer.NewRenderer(*options.Width, *options.Height, !isRecord, *options.BitDepth, *options.NumPBOs)
+	// Initialize renderer
+	mode := *options.Mode
+	isRecord := mode == "record" || mode == "stream"
+
+	r, err := renderer.NewRenderer(*options.Width, *options.Height, !isRecord, *options.BitDepth, *options.NumPBOs, audioDevice)
 	if err != nil {
 		log.Fatalf("Failed to create renderer: %v", err)
 	}
@@ -35,6 +39,12 @@ func runShadertoy(shaderArgs *api.ShaderArgs, options *options.ShaderOptions) {
 	err = r.InitScene(shaderArgs, options)
 	if err != nil {
 		log.Fatalf("Failed to initialize scene: %v", err)
+	}
+
+	// Start the audio device now that the scene (and mic channel) is initialized.
+	// This only starts the decoding process into the shared buffer.
+	if err := audioDevice.Start(); err != nil {
+		log.Fatalf("Failed to start audio device: %v", err)
 	}
 
 	switch mode {

@@ -2,6 +2,7 @@
 package audio
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"runtime"
@@ -49,12 +50,13 @@ type AudioPlayer struct {
 	formatCtx      *C.AVFormatContext
 	audioStream    *C.AVStream
 	packet         *C.AVPacket
-	stopChan       chan struct{}
 	isStreaming    bool
 	options        *options.ShaderOptions
 	internalBuffer []float32
 	startTime      time.Time
 	samplesWritten int64
+	buffer         *SharedAudioBuffer
+	cancel         context.CancelFunc
 }
 
 // NewAudioPlayer creates a new audio player.
@@ -65,7 +67,6 @@ func NewAudioPlayer(options *options.ShaderOptions) (*AudioPlayer, error) {
 
 	p := &AudioPlayer{
 		options:        options,
-		stopChan:       make(chan struct{}),
 		internalBuffer: make([]float32, 0, outputFrameSize*4), // Pre-allocate some capacity
 	}
 
@@ -89,7 +90,8 @@ func (p *AudioPlayer) getOutputFormatAndDevice() (format, device string) {
 }
 
 // Start begins the audio playback by setting up the FFmpeg pipeline for raw PCM output.
-func (p *AudioPlayer) Start(input <-chan []float32) error {
+func (p *AudioPlayer) Start(buffer *SharedAudioBuffer) error {
+	p.buffer = buffer
 	formatName, deviceName := p.getOutputFormatAndDevice()
 
 	// --- Setup Muxer ---
@@ -141,58 +143,68 @@ func (p *AudioPlayer) Start(input <-chan []float32) error {
 
 	p.packet = C.av_packet_alloc()
 
-	go p.runOutputLoop(input)
+	var ctx context.Context
+	ctx, p.cancel = context.WithCancel(context.Background())
+
+	go p.runOutputLoop(ctx)
 	p.isStreaming = true
 
 	return nil
 }
 
 // runOutputLoop implements a buffering and pacing strategy to send fixed-size audio chunks.
-func (p *AudioPlayer) runOutputLoop(input <-chan []float32) {
+func (p *AudioPlayer) runOutputLoop(ctx context.Context) {
 	defer p.cleanup()
 	var pts int64 = 0
 	p.startTime = time.Now()
 	p.samplesWritten = 0
 
-	for data := range input {
-		p.internalBuffer = append(p.internalBuffer, data...)
+	ticker := time.NewTicker(time.Second * outputFrameSize / (outputSampleRate * 2))
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			// Pull data from the shared buffer
+			frameData := p.buffer.ReadLatest(outputFrameSize)
+			p.internalBuffer = append(p.internalBuffer, frameData...)
+		}
 
 		for len(p.internalBuffer) >= outputFrameSize {
-			expectedElapsedTime := time.Duration(float64(p.samplesWritten)*1e9/float64(outputSampleRate)) * time.Nanosecond
-			actualElapsedTime := time.Since(p.startTime)
-
-			if actualElapsedTime < expectedElapsedTime {
-				time.Sleep(expectedElapsedTime - actualElapsedTime)
-			}
-
-			frameData := p.internalBuffer[:outputFrameSize]
-			bufferSize := len(frameData) * 4 // 4 bytes per float32
-
-			if C.av_new_packet(p.packet, C.int(bufferSize)) < 0 {
-				log.Println("Error allocating packet")
-				continue
-			}
-
-			cDataPtr := (*[1 << 30]byte)(unsafe.Pointer(p.packet.data))[:bufferSize:bufferSize]
-			goSliceAsBytes := (*[1 << 30]byte)(unsafe.Pointer(&frameData[0]))[:bufferSize:bufferSize]
-			copy(cDataPtr, goSliceAsBytes)
-
-			p.packet.pts = C.int64_t(pts)
-			p.packet.dts = C.int64_t(pts)
-			p.packet.duration = C.int64_t(len(frameData))
-			p.packet.stream_index = p.audioStream.index
-
-			ret := C.av_interleaved_write_frame(p.formatCtx, p.packet)
-			if ret < 0 {
-				log.Printf("Error writing audio frame: %s", C.GoString(C.av_error_str(ret)))
-			}
-			C.av_packet_unref(p.packet)
-
-			pts += int64(len(frameData))
-			p.samplesWritten += int64(len(frameData))
-			p.internalBuffer = p.internalBuffer[outputFrameSize:]
+			p.sendFrame(&pts)
 		}
 	}
+}
+
+func (p *AudioPlayer) sendFrame(pts *int64) {
+	frameData := p.internalBuffer[:outputFrameSize]
+	bufferSize := len(frameData) * 4 // 4 bytes per float32
+
+	if C.av_new_packet(p.packet, C.int(bufferSize)) < 0 {
+		log.Println("Error allocating packet")
+		return
+	}
+
+	cDataPtr := (*[1 << 30]byte)(unsafe.Pointer(p.packet.data))[:bufferSize:bufferSize]
+	goSliceAsBytes := (*[1 << 30]byte)(unsafe.Pointer(&frameData[0]))[:bufferSize:bufferSize]
+	copy(cDataPtr, goSliceAsBytes)
+
+	p.packet.pts = C.int64_t(*pts)
+	p.packet.dts = C.int64_t(*pts)
+	p.packet.duration = C.int64_t(len(frameData))
+	p.packet.stream_index = p.audioStream.index
+
+	ret := C.av_interleaved_write_frame(p.formatCtx, p.packet)
+	if ret < 0 {
+		log.Printf("Error writing audio frame: %s", C.GoString(C.av_error_str(ret)))
+	}
+	C.av_packet_unref(p.packet)
+
+	*pts += int64(len(frameData))
+	p.samplesWritten += int64(len(frameData))
+	p.internalBuffer = p.internalBuffer[outputFrameSize:]
 }
 
 // cleanup writes the trailer and frees all resources.
@@ -223,6 +235,8 @@ func (p *AudioPlayer) Stop() error {
 		return nil
 	}
 	p.isStreaming = false
-	close(p.stopChan)
+	if p.cancel != nil {
+		p.cancel()
+	}
 	return nil
 }

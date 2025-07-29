@@ -10,10 +10,10 @@ import (
 	"unsafe"
 
 	gl "github.com/go-gl/gl/v4.1-core/gl"
-	"github.com/richinsley/goshadertoy/audio"
+	audio "github.com/richinsley/goshadertoy/audio"
 	inputs "github.com/richinsley/goshadertoy/inputs"
 	options "github.com/richinsley/goshadertoy/options"
-	"github.com/richinsley/goshadertoy/semaphore"
+	semaphore "github.com/richinsley/goshadertoy/semaphore"
 	sharedmemory "github.com/richinsley/goshadertoy/sharedmemory"
 	ffmpeg "github.com/u2takey/ffmpeg-go"
 )
@@ -197,6 +197,17 @@ func (or *OffscreenRenderer) readYUVPixelsAsync(width, height int) ([]byte, erro
 	or.pboIndex = (or.pboIndex + 3) % len(or.pbos)
 
 	return yuvData, nil
+}
+
+func findMicChannel(r *Renderer) *inputs.MicChannel {
+	for _, pass := range r.namedPasses {
+		for _, ch := range pass.channels {
+			if mic, ok := ch.(*inputs.MicChannel); ok {
+				return mic
+			}
+		}
+	}
+	return nil
 }
 
 func (r *Renderer) getArgs(options *options.ShaderOptions, ffmpegOutPixFmt string, hasAudio bool) (inputArgs, outputArgs ffmpeg.KwArgs) {
@@ -443,8 +454,15 @@ func (r *Renderer) runEncoder(options *options.ShaderOptions, frameChan <-chan *
 				if len(audioData) > 0 {
 					audioFrameSize := 4096
 					byteData := (*[1 << 30]byte)(unsafe.Pointer(&audioData[0]))[: len(audioData)*4 : len(audioData)*4]
-					copy(internalAudioBuffer[internalAudioBufferOccupancy:], byteData)
-					internalAudioBufferOccupancy += len(byteData)
+
+					// Only increment occupancy by the number of bytes actually copied.
+					bytesCopied := copy(internalAudioBuffer[internalAudioBufferOccupancy:], byteData)
+					internalAudioBufferOccupancy += bytesCopied
+
+					// If the buffer was full, log a warning that data was dropped.
+					if bytesCopied < len(byteData) {
+						log.Printf("Warning: Encoder audio buffer overflow. Dropped %d bytes.", len(byteData)-bytesCopied)
+					}
 
 					for internalAudioBufferOccupancy >= audioFrameSize {
 						if err := audioEmptySem.Acquire(); err != nil {
@@ -516,19 +534,32 @@ func (r *Renderer) runStreamMode(options *options.ShaderOptions) error {
 	var audioChan chan []float32
 	encoderDoneChan := make(chan error, 1)
 
-	if *options.AudioInputFile != "" || *options.AudioInputDevice != "" {
+	hasAudio := r.audioDevice != nil && (*options.AudioInputFile != "" || *options.AudioInputDevice != "")
+	if hasAudio {
 		audioChan = make(chan []float32, 16)
-		audioDevice, err := audio.NewFFmpegAudioDevice(options)
-		if err != nil {
-			return fmt.Errorf("failed to create audio device: %w", err)
-		}
-		defer audioDevice.Stop()
 
-		rawAudioChan, err := audioDevice.Start()
-		if err != nil {
-			return fmt.Errorf("failed to start audio device: %w", err)
-		}
-		go audio.Tee(rawAudioChan, audioChan)
+		// Bridge goroutine to pull from the shared buffer and push to the encoder's channel.
+		go func() {
+			// This goroutine will exit when the main program does. For more robust
+			// shutdown, a context passed from the caller would be ideal.
+			defer func() {
+				if r := recover(); r != nil {
+					// The channel may be closed by the encoder finishing early.
+					log.Printf("Recovered in audio bridge: %v", r)
+				}
+			}()
+
+			samplesPerFrame := r.audioDevice.SampleRate() / *options.FPS
+			ticker := time.NewTicker(time.Second / time.Duration(*options.FPS))
+			defer ticker.Stop()
+
+			for range ticker.C {
+				samples := r.audioDevice.GetBuffer().ReadLatest(samplesPerFrame)
+				if len(samples) > 0 {
+					audioChan <- samples
+				}
+			}
+		}()
 	}
 
 	go r.runEncoder(options, frameChan, audioChan, encoderDoneChan)
@@ -550,6 +581,9 @@ func (r *Renderer) runStreamMode(options *options.ShaderOptions) error {
 		select {
 		case err := <-encoderDoneChan:
 			log.Printf("Encoder finished with error: %v", err)
+			if audioChan != nil {
+				close(audioChan)
+			}
 			return err
 		default:
 		}
@@ -601,25 +635,19 @@ func (r *Renderer) runRecordMode(options *options.ShaderOptions) error {
 	var audioChan chan []float32
 	encoderDoneChan := make(chan error, 1)
 
-	if *options.AudioInputFile != "" || *options.AudioInputDevice != "" {
-		audioChan = make(chan []float32, 16)
-		audioDevice, err := audio.NewFFmpegAudioDevice(options)
-		if err != nil {
-			return fmt.Errorf("failed to create audio device: %w", err)
-		}
-		defer audioDevice.Stop()
+	micChannel := findMicChannel(r)
+	hasAudio := r.audioDevice != nil && (*options.AudioInputFile != "" || *options.AudioInputDevice != "")
 
-		rawAudioChan, err := audioDevice.Start()
-		if err != nil {
-			return fmt.Errorf("failed to start audio device: %w", err)
-		}
-		go audio.Tee(rawAudioChan, audioChan)
+	if hasAudio {
+		audioChan = make(chan []float32, 16)
 	}
 
 	go r.runEncoder(options, frameChan, audioChan, encoderDoneChan)
 
 	totalFrames := int(*options.Duration * float64(*options.FPS))
 	timeStep := 1.0 / float64(*options.FPS)
+	sampleRate := r.audioDevice.SampleRate()
+	samplesPerFrame := sampleRate / *options.FPS
 
 	for i := 0; i < totalFrames; i++ {
 		currentTime := float64(i) * timeStep
@@ -630,9 +658,41 @@ func (r *Renderer) runRecordMode(options *options.ShaderOptions) error {
 			Frame:     int32(i),
 		}
 
+		if hasAudio {
+			// 1. Ensure enough audio is decoded for the current frame
+			targetSample := int64((currentTime + timeStep) * float64(sampleRate))
+			r.audioDevice.DecodeUntil(targetSample)
+
+			// 2. Pull the stereo audio for this frame from the buffer
+			// The number of stereo samples is samplesPerFrame, so the slice length is *2
+			stereoSamples := r.audioDevice.GetBuffer().ReadLatest(samplesPerFrame * 2)
+
+			// 3. Send the stereo audio to the encoder
+			if len(stereoSamples) > 0 {
+				audioChan <- stereoSamples
+			}
+
+			// 4. If there's a mic channel, downmix and process the audio for FFT
+			if micChannel != nil {
+				// We need the last 2048 mono samples. Let's take the last 4096 stereo samples to be safe.
+				const stereoFFTSize = 2048 * 2
+				var fftStereoChunk []float32
+				if len(stereoSamples) > stereoFFTSize {
+					fftStereoChunk = stereoSamples[len(stereoSamples)-stereoFFTSize:]
+				} else {
+					fftStereoChunk = stereoSamples
+				}
+
+				monoSamples := audio.DownmixStereoToMono(fftStereoChunk)
+				micChannel.ProcessAudio(monoSamples)
+			}
+		}
+
+		// 5. Render the video frame. This will call micChannel.Update() to upload the texture.
 		r.RenderFrame(currentTime, int32(i), [4]float32{0, 0, 0, 0}, uniforms)
 		r.RenderToYUV()
 
+		// 6. Send the video frame to the encoder
 		gl.BindFramebuffer(gl.READ_FRAMEBUFFER, r.offscreenRenderer.yuvFbo)
 		pixels, err := r.offscreenRenderer.readYUVPixelsAsync(*options.Width, *options.Height)
 		gl.BindFramebuffer(gl.READ_FRAMEBUFFER, 0)
@@ -640,7 +700,6 @@ func (r *Renderer) runRecordMode(options *options.ShaderOptions) error {
 			log.Printf("Error reading pixels on frame %d: %v", i, err)
 			break
 		}
-
 		frameChan <- &Frame{Pixels: pixels, PTS: int64(i)}
 	}
 

@@ -58,7 +58,7 @@ func (r *Renderer) GetRenderPass(name string, shaderArgs *api.ShaderArgs, option
 		width, height = r.context.GetFramebufferSize()
 	}
 
-	channels, err := inputs.GetChannels(passArgs.Inputs, width, height, r.quadVAO, r.buffers, options)
+	channels, err := inputs.GetChannels(passArgs.Inputs, width, height, r.quadVAO, r.buffers, options, r.audioDevice)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create channels: %w", err)
 	}
