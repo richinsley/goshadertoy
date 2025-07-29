@@ -2,128 +2,259 @@
 package audio
 
 import (
-	"bytes"
-	"encoding/binary"
-	"io"
+	"fmt"
 	"log"
-	"os/exec"
-	"strings"
-	"syscall"
+	"time"
+	"unsafe"
 
 	options "github.com/richinsley/goshadertoy/options"
-	ffmpeg "github.com/u2takey/ffmpeg-go"
 )
+
+/*
+#cgo pkg-config: libavformat libavcodec libavutil libswresample
+#include <libavformat/avformat.h>
+#include <libavcodec/avcodec.h>
+#include <libavutil/opt.h>
+#include <libavutil/channel_layout.h>
+#include <libavutil/mathematics.h>
+#include <libswresample/swresample.h>
+
+
+// av_err2str is a macro, so we need a wrapper function
+static inline const char* av_error_str(int errnum) {
+    static char str[AV_ERROR_MAX_STRING_SIZE];
+    return av_make_error_string(str, AV_ERROR_MAX_STRING_SIZE, errnum);
+}
+
+// C wrapper to get a channel layout from a string descriptor
+static int get_ch_layout_from_string(AVChannelLayout* layout, const char* str) {
+    return av_channel_layout_from_string(layout, str);
+}
+*/
+import "C"
 
 // ffmpegBaseDevice contains the common logic for all FFmpeg-based audio devices.
 type ffmpegBaseDevice struct {
-	cmd         *exec.Cmd
-	pipeReader  io.ReadCloser
-	audioChan   chan []float32
-	stopChan    chan struct{}
-	sampleRate  int
-	isStreaming bool
-	options     *options.ShaderOptions
-	player      *AudioPlayer
+	formatCtx           *C.AVFormatContext
+	codecCtx            *C.AVCodecContext
+	swrCtx              *C.SwrContext
+	audioStream         *C.AVStream
+	outChLayout         C.AVChannelLayout
+	audioChan           chan []float32
+	stopChan            chan struct{}
+	sampleRate          int
+	isStreaming         bool
+	player              *AudioPlayer
+	options             *options.ShaderOptions
+	enableRateEmulation bool
+	startTime           time.Time
+	samplesSent         int64
 }
 
-// Start initiates the FFmpeg process and begins audio capture.
-func (d *ffmpegBaseDevice) Start(inputArgs ffmpeg.KwArgs) (<-chan []float32, error) {
-	d.audioChan = make(chan []float32, 16)
+// init initializes the FFmpeg libraries and sets up the decoding pipeline.
+func (d *ffmpegBaseDevice) init(input, format, channelLayout string, enableRateEmulation bool, inputOptions map[string]string) error {
+	d.enableRateEmulation = enableRateEmulation
 
-	pipeReader, pipeWriter := io.Pipe()
-	d.pipeReader = pipeReader
+	// Open Input
+	cInput := C.CString(input)
+	defer C.free(unsafe.Pointer(cInput))
 
-	outputArgs := ffmpeg.KwArgs{
-		"f":             "f32le",
-		"c:a":           "pcm_f32le",
-		"ar":            "44100",
-		"ac":            "1",
-		"flush_packets": "1",
+	var cFormat *C.AVInputFormat
+	if format != "" {
+		cFormatName := C.CString(format)
+		defer C.free(unsafe.Pointer(cFormatName))
+		cFormat = C.av_find_input_format(cFormatName)
 	}
 
-	var inputFile string
-	if *d.options.AudioInputDevice != "" {
-		inputFile = *d.options.AudioInputDevice
-	} else {
-		inputFile = *d.options.AudioInputFile
+	var avDict *C.AVDictionary
+	for key, value := range inputOptions {
+		cKey := C.CString(key)
+		cValue := C.CString(value)
+		C.av_dict_set(&avDict, cKey, cValue, 0)
+		C.free(unsafe.Pointer(cKey))
+		C.free(unsafe.Pointer(cValue))
+	}
+	defer C.av_dict_free(&avDict)
+
+	// avformat_open_input allocates formatCtx, so it must be cleaned up on failure
+	if C.avformat_open_input(&d.formatCtx, cInput, cFormat, &avDict) != 0 {
+		return fmt.Errorf("failed to open input: %s", input)
 	}
 
-	log.Printf("Starting FFmpeg audio capture for input: %s", inputFile)
-
-	ffmpegNode := ffmpeg.Input(inputFile, inputArgs)
-	ffmpegCmd := ffmpegNode.Output("pipe:", outputArgs).
-		WithOutput(pipeWriter).ErrorToStdOut()
-
-	if d.options.FFMPEGPath != nil && *d.options.FFMPEGPath != "" {
-		ffmpegCmd.SetFfmpegPath(*d.options.FFMPEGPath)
+	if C.avformat_find_stream_info(d.formatCtx, nil) < 0 {
+		d.cleanup() // Cleanup on failure
+		return fmt.Errorf("failed to find stream info")
 	}
 
-	d.cmd = ffmpegCmd.Compile()
-
-	go func() {
-		err := d.cmd.Run()
-		if err != nil && !strings.Contains(err.Error(), "signal: killed") {
-			log.Printf("FFmpeg command finished with error: %v", err)
+	// Find Audio Stream and Decoder
+	streamIndex := -1
+	for i := 0; i < int(d.formatCtx.nb_streams); i++ {
+		stream := *(**C.AVStream)(unsafe.Pointer(uintptr(unsafe.Pointer(d.formatCtx.streams)) + uintptr(i)*unsafe.Sizeof(*d.formatCtx.streams)))
+		if stream.codecpar.codec_type == C.AVMEDIA_TYPE_AUDIO {
+			d.audioStream = stream
+			streamIndex = i
+			break
 		}
-		pipeWriter.Close()
-	}()
+	}
+	if streamIndex == -1 {
+		d.cleanup()
+		return fmt.Errorf("could not find audio stream")
+	}
+
+	decoder := C.avcodec_find_decoder(d.audioStream.codecpar.codec_id)
+	if decoder == nil {
+		d.cleanup()
+		return fmt.Errorf("unsupported codec")
+	}
+
+	d.codecCtx = C.avcodec_alloc_context3(decoder)
+	if d.codecCtx == nil {
+		d.cleanup()
+		return fmt.Errorf("failed to allocate codec context")
+	}
+
+	if C.avcodec_parameters_to_context(d.codecCtx, d.audioStream.codecpar) < 0 {
+		d.cleanup()
+		return fmt.Errorf("failed to copy codec parameters to context")
+	}
+
+	if C.avcodec_open2(d.codecCtx, decoder, nil) < 0 {
+		d.cleanup()
+		return fmt.Errorf("failed to open codec")
+	}
+
+	// Setup Resampler
+	d.sampleRate = int(d.codecCtx.sample_rate)
+
+	cLayoutStr := C.CString(channelLayout)
+	defer C.free(unsafe.Pointer(cLayoutStr))
+	if C.get_ch_layout_from_string(&d.outChLayout, cLayoutStr) != 0 {
+		d.cleanup()
+		return fmt.Errorf("invalid output channel layout: %s", channelLayout)
+	}
+
+	ret := C.swr_alloc_set_opts2(&d.swrCtx,
+		&d.outChLayout, C.AV_SAMPLE_FMT_FLT, C.int(d.sampleRate),
+		&d.codecCtx.ch_layout, d.codecCtx.sample_fmt, d.codecCtx.sample_rate, 0, nil)
+
+	if ret < 0 {
+		d.cleanup()
+		return fmt.Errorf("failed to allocate resampler context")
+	}
+	C.swr_init(d.swrCtx)
+
+	return nil
+}
+
+// start begins the audio processing loop.
+func (d *ffmpegBaseDevice) start() (<-chan []float32, error) {
+	d.audioChan = make(chan []float32, 16)
+	d.isStreaming = true
+
+	go d.runAudioLoop(d.audioChan)
 
 	if d.player != nil {
 		playerChan := make(chan []float32, 16)
 		d.player.Start(playerChan)
-		producerChan := make(chan []float32, 16)
-		go Tee(producerChan, d.audioChan, playerChan)
-		go func() {
-			defer close(producerChan)
-			d.runAudioLoop(producerChan)
-		}()
-	} else {
-		go func() {
-			defer close(d.audioChan)
-			d.runAudioLoop(d.audioChan)
-		}()
+		Tee(d.audioChan, playerChan)
 	}
 
-	d.isStreaming = true
 	return d.audioChan, nil
 }
 
-// runAudioLoop reads raw audio data from the FFmpeg pipe and sends it to the output channels.
-func (d *ffmpegBaseDevice) runAudioLoop(outputs ...chan<- []float32) {
-	defer func() {
-		log.Println("FFmpeg audio loop finished.")
-	}()
+// runAudioLoop is the main decoding and resampling loop.
+func (d *ffmpegBaseDevice) runAudioLoop(output chan<- []float32) {
+	defer d.cleanup()
+	defer close(output)
 
-	const bufferSize = 4096 // 1024 samples * 4 bytes/sample
-	buffer := make([]byte, bufferSize)
+	packet := C.av_packet_alloc()
+	defer C.av_packet_free(&packet)
+	frame := C.av_frame_alloc()
+	defer C.av_frame_free(&frame)
+	resampledFrame := C.av_frame_alloc()
+	defer C.av_frame_free(&resampledFrame)
+
+	d.startTime = time.Now()
+	d.samplesSent = 0
 
 	for {
 		select {
 		case <-d.stopChan:
 			return
 		default:
-			n, err := io.ReadFull(d.pipeReader, buffer)
-			if err != nil {
-				if err != io.EOF && err != io.ErrUnexpectedEOF {
-					log.Printf("Error reading from FFmpeg pipe: %v", err)
-				}
-				return
+			if C.av_read_frame(d.formatCtx, packet) < 0 {
+				return // End of stream or error
 			}
 
-			if n > 0 {
-				floatData := make([]float32, n/4)
-				reader := bytes.NewReader(buffer[:n])
-				binary.Read(reader, binary.LittleEndian, &floatData)
+			if packet.stream_index == C.int(d.audioStream.index) {
+				if C.avcodec_send_packet(d.codecCtx, packet) < 0 {
+					C.av_packet_unref(packet)
+					continue
+				}
 
-				for _, out := range outputs {
-					out <- floatData
+				for C.avcodec_receive_frame(d.codecCtx, frame) == 0 {
+					// 1. Set the properties for the output frame
+					resampledFrame.sample_rate = C.int(d.sampleRate)
+					resampledFrame.ch_layout = d.outChLayout
+					resampledFrame.format = C.AV_SAMPLE_FMT_FLT
+					// 2. Calculate the number of output samples needed
+					resampledFrame.nb_samples = C.int(C.av_rescale_rnd(C.int64_t(frame.nb_samples), C.int64_t(d.sampleRate), C.int64_t(frame.sample_rate), C.AV_ROUND_UP))
+
+					// 3. Allocate the buffer for the output frame
+					if C.av_frame_get_buffer(resampledFrame, 0) < 0 {
+						log.Println("Error: Could not allocate buffer for resampled frame")
+						C.av_frame_unref(frame)
+						continue
+					}
+
+					// 4. Perform the conversion
+					C.swr_convert(d.swrCtx, &resampledFrame.data[0], resampledFrame.nb_samples, &frame.data[0], frame.nb_samples)
+
+					numSamples := int(resampledFrame.nb_samples)
+					numChannels := int(d.outChLayout.nb_channels)
+
+					goSlice := (*[1 << 30]float32)(unsafe.Pointer(resampledFrame.data[0]))[: numSamples*numChannels : numSamples*numChannels]
+					dataCopy := make([]float32, len(goSlice))
+					copy(dataCopy, goSlice)
+
+					output <- dataCopy
+					d.samplesSent += int64(numSamples)
+
+					if d.enableRateEmulation {
+						elapsed := time.Since(d.startTime)
+						expectedSamples := int64(elapsed.Seconds() * float64(d.sampleRate))
+						if d.samplesSent > expectedSamples {
+							aheadSamples := d.samplesSent - expectedSamples
+							sleepDuration := time.Duration(float64(aheadSamples)*1e9/float64(d.sampleRate)) * time.Nanosecond
+							time.Sleep(sleepDuration)
+						}
+					}
+
+					C.av_frame_unref(resampledFrame)
+					C.av_frame_unref(frame)
 				}
 			}
+			C.av_packet_unref(packet)
 		}
 	}
 }
 
-// Stop terminates the FFmpeg process.
+// cleanup frees all allocated FFmpeg resources.
+func (d *ffmpegBaseDevice) cleanup() {
+	log.Println("Cleaning up FFmpeg resources...")
+	C.av_channel_layout_uninit(&d.outChLayout)
+	if d.swrCtx != nil {
+		C.swr_free(&d.swrCtx)
+	}
+	if d.codecCtx != nil {
+		C.avcodec_free_context(&d.codecCtx)
+	}
+	if d.formatCtx != nil {
+		C.avformat_close_input(&d.formatCtx)
+	}
+}
+
+// Stop signals the audio loop to terminate.
 func (d *ffmpegBaseDevice) Stop() error {
 	if !d.isStreaming {
 		return nil
@@ -134,17 +265,10 @@ func (d *ffmpegBaseDevice) Stop() error {
 	if d.player != nil {
 		d.player.Stop()
 	}
-
-	if d.cmd != nil && d.cmd.Process != nil {
-		if err := d.cmd.Process.Signal(syscall.SIGINT); err != nil {
-			log.Printf("Failed to send SIGINT to FFmpeg, killing process: %v", err)
-			d.cmd.Process.Kill()
-		}
-	}
 	return nil
 }
 
-// SampleRate returns the sample rate of the audio device.
+// SampleRate returns the detected sample rate of the audio stream.
 func (d *ffmpegBaseDevice) SampleRate() int {
 	return d.sampleRate
 }

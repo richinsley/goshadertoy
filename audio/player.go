@@ -1,44 +1,60 @@
+// audio/player.go
 package audio
 
 import (
 	"fmt"
-	"io"
 	"log"
-	"os"
-	"os/exec"
 	"runtime"
-	"strings"
+	"time"
 	"unsafe"
 
 	options "github.com/richinsley/goshadertoy/options"
-	semaphore "github.com/richinsley/goshadertoy/semaphore"
-	sharedmemory "github.com/richinsley/goshadertoy/sharedmemory"
-	ffmpeg "github.com/u2takey/ffmpeg-go"
 )
 
 /*
-#cgo CFLAGS: -I../shmframe
-#include <string.h>
-#include "protocol.h"
+#cgo pkg-config: libavformat libavcodec libavutil
+#include <libavformat/avformat.h>
+#include <libavcodec/avcodec.h>
+#include <libavutil/opt.h>
+#include <libavutil/channel_layout.h>
+
+// C wrapper to find an output format by its short name
+static const AVOutputFormat* find_output_format(const char* name) {
+    const AVOutputFormat *fmt = NULL;
+    void *opaque = NULL;
+    while ((fmt = av_muxer_iterate(&opaque))) {
+        if (strcmp(fmt->name, name) == 0) {
+            return fmt;
+        }
+    }
+    return NULL;
+}
+
+// av_err2str is a macro, so we need a wrapper function
+static inline const char* av_error_str(int errnum) {
+    static char str[AV_ERROR_MAX_STRING_SIZE];
+    av_make_error_string(str, AV_ERROR_MAX_STRING_SIZE, errnum);
+    return str;
+}
 */
 import "C"
 
-const numAudioBuffers = 3
+const outputSampleRate = 44100
+const outputChannelLayout = "mono"
+const outputSampleFormat = C.AV_SAMPLE_FMT_FLT // Corresponds to pcm_f32le
+const outputFrameSize = 1024                   // A standard audio frame size
 
-// AudioPlayer plays audio data using FFmpeg via shared memory.
+// AudioPlayer plays raw audio data using FFmpeg device muxers.
 type AudioPlayer struct {
-	cmd         *exec.Cmd
-	pipeWriter  io.WriteCloser
-	options     *options.ShaderOptions
-	shm         *sharedmemory.SharedMemory
-	emptySem    semaphore.Semaphore
-	fullSem     semaphore.Semaphore
-	stopChan    chan struct{}
-	isStreaming bool
-
-	internalBuffer          []byte
-	internalBufferOccupancy int
-	frameBufferSize         int
+	formatCtx      *C.AVFormatContext
+	audioStream    *C.AVStream
+	packet         *C.AVPacket
+	stopChan       chan struct{}
+	isStreaming    bool
+	options        *options.ShaderOptions
+	internalBuffer []float32
+	startTime      time.Time
+	samplesWritten int64
 }
 
 // NewAudioPlayer creates a new audio player.
@@ -48,215 +64,157 @@ func NewAudioPlayer(options *options.ShaderOptions) (*AudioPlayer, error) {
 	}
 
 	p := &AudioPlayer{
-		options:  options,
-		stopChan: make(chan struct{}),
+		options:        options,
+		stopChan:       make(chan struct{}),
+		internalBuffer: make([]float32, 0, outputFrameSize*4), // Pre-allocate some capacity
 	}
 
 	return p, nil
 }
 
-// getOutputArgs configures the FFmpeg output arguments based on the OS.
-func (p *AudioPlayer) getOutputArgs() (string, ffmpeg.KwArgs) {
-	outputArgs := ffmpeg.KwArgs{}
-	device := *p.options.AudioOutputDevice
-
+// getOutputFormatAndDevice determines the correct FFmpeg format and device string based on the OS.
+func (p *AudioPlayer) getOutputFormatAndDevice() (format, device string) {
+	device = *p.options.AudioOutputDevice
 	switch runtime.GOOS {
 	case "darwin":
-		outputArgs["f"] = "audiotoolbox"
-		// audiotoolbox requires a destination.
-		device = "/dev/null"
+		format = "audiotoolbox"
 	case "linux":
-		outputArgs["f"] = "pulse"
+		format = "pulse"
 	case "windows":
-		outputArgs["f"] = "dshow"
+		format = "dshow"
 	default:
 		log.Fatalf("Unsupported OS for live audio playback: %s", runtime.GOOS)
 	}
-	return device, outputArgs
+	return
 }
 
-// Start begins the audio playback.
+// Start begins the audio playback by setting up the FFmpeg pipeline for raw PCM output.
 func (p *AudioPlayer) Start(input <-chan []float32) error {
-	outputDevice, outputArgs := p.getOutputArgs()
+	formatName, deviceName := p.getOutputFormatAndDevice()
 
-	pid := os.Getpid()
-	shmNameStr := fmt.Sprintf("goshadertoy_player_%d", pid)
-	emptySemName := fmt.Sprintf("goshadertoy_player_empty_%d", pid)
-	fullSemName := fmt.Sprintf("goshadertoy_player_full_%d", pid)
+	// --- Setup Muxer ---
+	cFormatName := C.CString(formatName)
+	defer C.free(unsafe.Pointer(cFormatName))
+	cDeviceName := C.CString(deviceName)
+	defer C.free(unsafe.Pointer(cDeviceName))
 
-	semaphore.RemoveSemaphore(emptySemName)
-	semaphore.RemoveSemaphore(fullSemName)
-
-	p.frameBufferSize = 4096 // 1024 samples * 4 bytes/sample
-	shmSize := int(unsafe.Sizeof(C.SHMControlBlock{})) + (p.frameBufferSize * numAudioBuffers)
-
-	p.internalBuffer = make([]byte, p.frameBufferSize*2)
-	p.internalBufferOccupancy = 0
-
-	var err error
-	p.shm, err = sharedmemory.CreateSharedMemory(shmNameStr, shmSize)
-	if err != nil {
-		return fmt.Errorf("player: failed to create shared memory: %w", err)
+	outputFormat := C.find_output_format(cFormatName)
+	if outputFormat == nil {
+		return fmt.Errorf("could not find output format '%s'", formatName)
 	}
 
-	p.emptySem, err = semaphore.NewSemaphore(emptySemName, numAudioBuffers)
-	if err != nil {
-		p.shm.Close()
-		return fmt.Errorf("player: failed to create empty semaphore: %w", err)
+	if C.avformat_alloc_output_context2(&p.formatCtx, outputFormat, nil, cDeviceName) < 0 {
+		return fmt.Errorf("could not create output context")
 	}
 
-	p.fullSem, err = semaphore.NewSemaphore(fullSemName, 0)
-	if err != nil {
-		p.shm.Close()
-		p.emptySem.Close()
-		semaphore.RemoveSemaphore(emptySemName)
-		return fmt.Errorf("player: failed to create full semaphore: %w", err)
+	// --- Setup Raw PCM Stream (No Encoder) ---
+	p.audioStream = C.avformat_new_stream(p.formatCtx, nil)
+	if p.audioStream == nil {
+		return fmt.Errorf("could not create new stream")
 	}
 
-	pipeReader, pipeWriter := io.Pipe()
-	p.pipeWriter = pipeWriter
+	p.audioStream.time_base.num = 1
+	p.audioStream.time_base.den = outputSampleRate
 
-	inputArgs := ffmpeg.KwArgs{
-		"f":  "shm_demuxer",
-		"re": "",
-	}
+	codecpar := p.audioStream.codecpar
+	codecpar.codec_type = C.AVMEDIA_TYPE_AUDIO
+	codecpar.codec_id = C.AV_CODEC_ID_PCM_F32LE
+	codecpar.format = outputSampleFormat
+	codecpar.sample_rate = outputSampleRate
 
-	ffmpegCmdNode := ffmpeg.Input("pipe:", inputArgs).
-		Output(outputDevice, outputArgs).
-		WithInput(pipeReader)
+	cLayoutStr := C.CString(outputChannelLayout)
+	defer C.free(unsafe.Pointer(cLayoutStr))
+	C.av_channel_layout_from_string(&codecpar.ch_layout, cLayoutStr)
 
-	if *p.options.FFMPEGPath != "" {
-		ffmpegCmdNode = ffmpegCmdNode.SetFfmpegPath(*p.options.FFMPEGPath)
-	}
-
-	p.cmd = ffmpegCmdNode.Compile()
-
-	p.cmd.Stdout = nil
-	p.cmd.Stderr = log.Writer()
-
-	go func() {
-		err := p.cmd.Run()
-		if err != nil && !strings.Contains(err.Error(), "signal: killed") {
-			log.Printf("FFmpeg audio player command finished with error: %v", err)
+	// --- Open Output and Write Header ---
+	// Only call avio_open if the format doesn't handle its own I/O.
+	// Device muxers like audiotoolbox have the AVFMT_NOFILE flag set.
+	if (outputFormat.flags & C.AVFMT_NOFILE) == 0 {
+		if C.avio_open(&p.formatCtx.pb, cDeviceName, C.AVIO_FLAG_WRITE) < 0 {
+			return fmt.Errorf("could not open output URL '%s'", deviceName)
 		}
-		pipeWriter.Close()
-	}()
-
-	header := C.SHMHeader{
-		stream_count: 1, sample_rate: 44100, channels: 1, bit_depth: 32, version: 1,
-	}
-	C.strncpy((*C.char)(unsafe.Pointer(&header.shm_file_audio[0])), C.CString("/"+shmNameStr), 511)
-	C.strncpy((*C.char)(unsafe.Pointer(&header.empty_sem_name_audio[0])), C.CString(emptySemName), 255)
-	C.strncpy((*C.char)(unsafe.Pointer(&header.full_sem_name_audio[0])), C.CString(fullSemName), 255)
-
-	headerBytes := (*[unsafe.Sizeof(header)]byte)(unsafe.Pointer(&header))[:]
-	if _, err := pipeWriter.Write(headerBytes); err != nil {
-		return fmt.Errorf("failed to write header to FFmpeg player: %w", err)
 	}
 
-	go p.runProducer(input)
+	if C.avformat_write_header(p.formatCtx, nil) < 0 {
+		return fmt.Errorf("could not write header")
+	}
+
+	p.packet = C.av_packet_alloc()
+
+	go p.runOutputLoop(input)
 	p.isStreaming = true
 
 	return nil
 }
 
-// writeFullFrameToSHM writes one complete, fixed-size frame to shared memory.
-func (p *AudioPlayer) writeFullFrameToSHM(writeIndex *uint32, pts *int64) error {
-	if err := p.emptySem.Acquire(); err != nil {
-		return fmt.Errorf("producer failed to acquire empty semaphore: %w", err)
-	}
-
-	writeOffset := int64(unsafe.Sizeof(C.SHMControlBlock{})) + (int64(*writeIndex) * int64(p.frameBufferSize))
-
-	// Use the buffered data directly
-	_, err := p.shm.WriteAt(p.internalBuffer[:p.frameBufferSize], writeOffset)
-	if err != nil {
-		p.emptySem.Release()
-		return fmt.Errorf("producer failed to write to shared memory: %w", err)
-	}
-
-	frameHeader := C.FrameHeader{
-		cmdtype: 1, // audio
-		size:    C.uint32_t(p.frameBufferSize),
-		pts:     C.int64_t(*pts),
-		offset:  C.uint64_t(writeOffset),
-	}
-	// A full frame corresponds to frameBufferSize / 4 samples
-	*pts += int64(p.frameBufferSize / 4)
-
-	frameHeaderBytes := (*[unsafe.Sizeof(frameHeader)]byte)(unsafe.Pointer(&frameHeader))[:]
-	if _, err := p.pipeWriter.Write(frameHeaderBytes); err != nil {
-		p.emptySem.Release()
-		return fmt.Errorf("producer failed to write frame header: %w", err)
-	}
-
-	*writeIndex = (*writeIndex + 1) % numAudioBuffers
-
-	p.internalBufferOccupancy -= p.frameBufferSize
-	if p.internalBufferOccupancy > 0 {
-		copy(p.internalBuffer, p.internalBuffer[p.frameBufferSize:p.frameBufferSize+p.internalBufferOccupancy])
-	}
-
-	if err := p.fullSem.Release(); err != nil {
-		log.Printf("Producer failed to release full semaphore: %v", err)
-	}
-
-	return nil
-}
-
-// runProducer is the loop that takes audio data, buffers it, and writes full frames to shared memory.
-func (p *AudioPlayer) runProducer(input <-chan []float32) {
-	// defer func() {
-	// 	if p.pipeWriter != nil {
-	// 		controlBlockPtr := (*C.SHMControlBlock)(p.shm.GetPtr())
-	// 		controlBlockPtr.eof = 1
-	// 		eofHeader := C.FrameHeader{cmdtype: C.uint32_t(2)}
-	// 		eofHeaderBytes := (*[unsafe.Sizeof(eofHeader)]byte)(unsafe.Pointer(&eofHeader))[:]
-	// 		p.pipeWriter.Write(eofHeaderBytes)
-	// 		p.pipeWriter.Close()
-	// 	}
-	// }()
-
-	controlBlockPtr := (*C.SHMControlBlock)(p.shm.GetPtr())
-	controlBlockPtr.num_buffers = numAudioBuffers
-	controlBlockPtr.eof = 0
-
-	var writeIndex uint32 = 0
+// runOutputLoop implements a buffering and pacing strategy to send fixed-size audio chunks.
+func (p *AudioPlayer) runOutputLoop(input <-chan []float32) {
+	defer p.cleanup()
 	var pts int64 = 0
+	p.startTime = time.Now()
+	p.samplesWritten = 0
 
-	for {
-		select {
-		case <-p.stopChan:
-			return
-		case data, ok := <-input:
-			if !ok {
-				if p.internalBufferOccupancy > 0 {
-					paddingSize := p.frameBufferSize - p.internalBufferOccupancy
-					if paddingSize > 0 {
-						padding := make([]byte, paddingSize)
-						copy(p.internalBuffer[p.internalBufferOccupancy:], padding)
-						p.internalBufferOccupancy += paddingSize
-					}
-					p.writeFullFrameToSHM(&writeIndex, &pts)
-				}
-				return
+	for data := range input {
+		p.internalBuffer = append(p.internalBuffer, data...)
+
+		for len(p.internalBuffer) >= outputFrameSize {
+			expectedElapsedTime := time.Duration(float64(p.samplesWritten)*1e9/float64(outputSampleRate)) * time.Nanosecond
+			actualElapsedTime := time.Since(p.startTime)
+
+			if actualElapsedTime < expectedElapsedTime {
+				time.Sleep(expectedElapsedTime - actualElapsedTime)
 			}
 
-			// Efficiently convert []float32 to []byte without extra allocations
-			if len(data) > 0 {
-				byteData := (*[1 << 30]byte)(unsafe.Pointer(&data[0]))[: len(data)*4 : len(data)*4]
-				copy(p.internalBuffer[p.internalBufferOccupancy:], byteData)
-				p.internalBufferOccupancy += len(byteData)
+			frameData := p.internalBuffer[:outputFrameSize]
+			bufferSize := len(frameData) * 4 // 4 bytes per float32
+
+			if C.av_new_packet(p.packet, C.int(bufferSize)) < 0 {
+				log.Println("Error allocating packet")
+				continue
 			}
 
-			for p.internalBufferOccupancy >= p.frameBufferSize {
-				if err := p.writeFullFrameToSHM(&writeIndex, &pts); err != nil {
-					log.Printf("Error writing frame to SHM: %v", err)
-					return
-				}
+			cDataPtr := (*[1 << 30]byte)(unsafe.Pointer(p.packet.data))[:bufferSize:bufferSize]
+			goSliceAsBytes := (*[1 << 30]byte)(unsafe.Pointer(&frameData[0]))[:bufferSize:bufferSize]
+			copy(cDataPtr, goSliceAsBytes)
+
+			p.packet.pts = C.int64_t(pts)
+			p.packet.dts = C.int64_t(pts)
+			p.packet.duration = C.int64_t(len(frameData))
+			p.packet.stream_index = p.audioStream.index
+
+			ret := C.av_interleaved_write_frame(p.formatCtx, p.packet)
+			if ret < 0 {
+				log.Printf("Error writing audio frame: %s", C.GoString(C.av_error_str(ret)))
 			}
+			C.av_packet_unref(p.packet)
+
+			pts += int64(len(frameData))
+			p.samplesWritten += int64(len(frameData))
+			p.internalBuffer = p.internalBuffer[outputFrameSize:]
 		}
 	}
+}
+
+// cleanup writes the trailer and frees all resources.
+func (p *AudioPlayer) cleanup() {
+	if p.formatCtx != nil {
+		C.av_write_trailer(p.formatCtx)
+	}
+
+	if p.packet != nil {
+		C.av_packet_free(&p.packet)
+	}
+
+	if p.formatCtx != nil {
+		if p.audioStream != nil && p.audioStream.codecpar != nil {
+			C.av_channel_layout_uninit(&p.audioStream.codecpar.ch_layout)
+		}
+		if p.formatCtx.pb != nil {
+			C.avio_closep(&p.formatCtx.pb)
+		}
+		C.avformat_free_context(p.formatCtx)
+	}
+	log.Println("Audio player resources cleaned up.")
 }
 
 // Stop terminates the audio playback.
@@ -266,22 +224,5 @@ func (p *AudioPlayer) Stop() error {
 	}
 	p.isStreaming = false
 	close(p.stopChan)
-
-	if p.shm != nil {
-		p.shm.Close()
-	}
-	if p.emptySem != nil {
-		p.emptySem.Close()
-		semaphore.RemoveSemaphore(fmt.Sprintf("goshadertoy_player_empty_%d", os.Getpid()))
-	}
-	if p.fullSem != nil {
-		p.fullSem.Close()
-		semaphore.RemoveSemaphore(fmt.Sprintf("goshadertoy_player_full_%d", os.Getpid()))
-	}
-
-	if p.cmd != nil && p.cmd.Process != nil {
-		cmd := exec.Command("kill", "-KILL", fmt.Sprintf("%d", p.cmd.Process.Pid))
-		return cmd.Run()
-	}
 	return nil
 }

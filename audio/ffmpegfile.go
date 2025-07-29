@@ -5,7 +5,6 @@ import (
 	"log"
 
 	options "github.com/richinsley/goshadertoy/options"
-	ffmpeg "github.com/u2takey/ffmpeg-go"
 )
 
 // FFmpegFileInput reads audio from a file.
@@ -17,9 +16,8 @@ type FFmpegFileInput struct {
 func NewFFmpegFileInput(options *options.ShaderOptions) (*FFmpegFileInput, error) {
 	d := &FFmpegFileInput{
 		ffmpegBaseDevice: ffmpegBaseDevice{
-			options:    options,
-			stopChan:   make(chan struct{}),
-			sampleRate: 44100, // Default sample rate
+			options:  options,
+			stopChan: make(chan struct{}),
 		},
 	}
 	if *options.AudioOutputDevice != "" {
@@ -34,10 +32,21 @@ func NewFFmpegFileInput(options *options.ShaderOptions) (*FFmpegFileInput, error
 
 // Start configures FFmpeg to read from a file and starts the audio capture.
 func (d *FFmpegFileInput) Start() (<-chan []float32, error) {
-	inputArgs := ffmpeg.KwArgs{}
-	if *d.options.Mode == "stream" || *d.options.Mode == "live" {
-		inputArgs["re"] = ""
+	log.Println("Initializing FFmpeg for file input...")
+
+	// Rate emulation should only be enabled when treating the file as a live source.
+	// For "record" mode, we want to process as fast as possible.
+	enableRateEmulation := (*d.options.Mode == "live" || *d.options.Mode == "stream")
+	if enableRateEmulation {
+		log.Println("Rate emulation enabled for file input.")
 	}
-	log.Println("Starting FFmpeg file input...")
-	return d.ffmpegBaseDevice.Start(inputArgs)
+
+	// For file inputs, we don't need any special options like "re" anymore.
+	inputOptions := make(map[string]string)
+
+	err := d.init(*d.options.AudioInputFile, "", "mono", enableRateEmulation, inputOptions)
+	if err != nil {
+		return nil, err
+	}
+	return d.start()
 }

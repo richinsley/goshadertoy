@@ -27,6 +27,7 @@ import "C"
 import "fmt"
 
 func init() {
+	C.avdevice_register_all()
 	fmt.Printf("libavcodec version:    %d\n", uint(C.avcodec_version()))
 	fmt.Printf("libavformat version:   %d\n", uint(C.avformat_version()))
 	fmt.Printf("libavutil version:     %d\n", uint(C.avutil_version()))

@@ -6,7 +6,6 @@ import (
 	"runtime"
 
 	options "github.com/richinsley/goshadertoy/options"
-	ffmpeg "github.com/u2takey/ffmpeg-go"
 )
 
 // FFmpegDeviceInput captures audio from a live device.
@@ -18,9 +17,8 @@ type FFmpegDeviceInput struct {
 func NewFFmpegDeviceInput(options *options.ShaderOptions) (*FFmpegDeviceInput, error) {
 	d := &FFmpegDeviceInput{
 		ffmpegBaseDevice: ffmpegBaseDevice{
-			options:    options,
-			stopChan:   make(chan struct{}),
-			sampleRate: 44100, // Default sample rate
+			options:  options,
+			stopChan: make(chan struct{}),
 		},
 	}
 
@@ -36,18 +34,23 @@ func NewFFmpegDeviceInput(options *options.ShaderOptions) (*FFmpegDeviceInput, e
 
 // Start configures FFmpeg to capture from a live device and starts the process.
 func (d *FFmpegDeviceInput) Start() (<-chan []float32, error) {
-	inputArgs := ffmpeg.KwArgs{
-		"fflags": "nobuffer",
-	}
+	log.Println("Initializing FFmpeg for device input...")
+	var format string
+	inputOptions := map[string]string{"fflags": "nobuffer"}
 
 	switch runtime.GOOS {
 	case "darwin":
-		inputArgs["f"] = "avfoundation"
+		format = "avfoundation"
 	case "linux":
-		inputArgs["f"] = "pulse" // or "alsa"
+		format = "pulse"
 	case "windows":
-		inputArgs["f"] = "dshow"
+		format = "dshow"
 	}
-	log.Println("Starting FFmpeg device input...")
-	return d.ffmpegBaseDevice.Start(inputArgs)
+
+	// Rate emulation is never needed for live device capture.
+	err := d.init(*d.options.AudioInputDevice, format, "mono", false, inputOptions)
+	if err != nil {
+		return nil, err
+	}
+	return d.start()
 }
