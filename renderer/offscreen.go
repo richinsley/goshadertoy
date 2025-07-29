@@ -357,7 +357,7 @@ func (r *Renderer) runEncoder(options *options.ShaderOptions, frameChan <-chan *
 	}
 	var audioWriteIndex uint32 = 0
 	var audioPTS int64 = 0
-	internalAudioBuffer := make([]byte, 4096*2)
+	internalAudioBuffer := make([]byte, 4096*4)
 	internalAudioBufferOccupancy := 0
 
 	// FFmpeg setup with a single pipe
@@ -390,7 +390,7 @@ func (r *Renderer) runEncoder(options *options.ShaderOptions, frameChan <-chan *
 	if audioChan != nil {
 		header.stream_count = 2
 		header.sample_rate = 44100
-		header.channels = 1
+		header.channels = 2
 		header.bit_depth = 32
 		C.strncpy((*C.char)(unsafe.Pointer(&header.shm_file_audio[0])), C.CString("/"+audioShmNameStr), 511)
 		C.strncpy((*C.char)(unsafe.Pointer(&header.empty_sem_name_audio[0])), C.CString(audioEmptySemName), 255)

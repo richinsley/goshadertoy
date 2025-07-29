@@ -41,7 +41,7 @@ static inline const char* av_error_str(int errnum) {
 import "C"
 
 const outputSampleRate = 44100
-const outputChannelLayout = "mono"
+const outputChannelLayout = "stereo"
 const outputSampleFormat = C.AV_SAMPLE_FMT_FLT // Corresponds to pcm_f32le
 const outputFrameSize = 1024                   // A standard audio frame size
 
