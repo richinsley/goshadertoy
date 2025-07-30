@@ -13,7 +13,7 @@ import (
 )
 
 /*
-#cgo pkg-config: libavformat libavcodec libavutil
+#cgo CFLAGS: -I${SRCDIR}/../../release/include -I${SRCDIR}/../../release/include/arcana
 #include <libavformat/avformat.h>
 #include <libavcodec/avcodec.h>
 #include <libavutil/opt.h>
