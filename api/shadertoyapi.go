@@ -502,7 +502,7 @@ func downloadMediaChannels(inputs []Input, passType string, useCache bool) ([]*S
 				complete = false
 			}
 			channel.CubeData = images
-		case "mic", "musicstream":
+		case "mic":
 			// For microphone input, we don't download anything, just create a placeholder channel.
 		case "music":
 			mediaURL := shadertoyMediaURL + inp.Src
@@ -513,7 +513,9 @@ func downloadMediaChannels(inputs []Input, passType string, useCache bool) ([]*S
 			if useCache {
 				if f, err := os.Open(cachePath); err == nil {
 					f.Close()
-					havefile = true
+					if err != nil {
+						havefile = true
+					}
 				}
 			}
 

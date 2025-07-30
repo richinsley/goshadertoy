@@ -1,10 +1,5 @@
 package audio
 
-// We'll be using portaudio for audio input handling.
-// macos:	brew install portaudio
-// debian:	sudo apt-get install portaudio19-dev
-// windows:	pacman -S mingw-w64-x86_64-portaudio
-
 // A producer will implement this to provide a stream of audio sample chunks.
 type AudioDevice interface {
 	// Start begins audio processing.

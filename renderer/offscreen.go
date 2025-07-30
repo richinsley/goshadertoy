@@ -2,32 +2,17 @@ package renderer
 
 import (
 	"fmt"
-	"io"
 	"log"
-	"os"
-	"runtime"
 	"time"
-	"unsafe"
 
 	gl "github.com/go-gl/gl/v4.1-core/gl"
-	audio "github.com/richinsley/goshadertoy/audio"
-	inputs "github.com/richinsley/goshadertoy/inputs"
-	options "github.com/richinsley/goshadertoy/options"
-	semaphore "github.com/richinsley/goshadertoy/semaphore"
-	sharedmemory "github.com/richinsley/goshadertoy/sharedmemory"
-	ffmpeg "github.com/u2takey/ffmpeg-go"
+	"github.com/richinsley/goshadertoy/audio"
+	"github.com/richinsley/goshadertoy/encoder"
+	"github.com/richinsley/goshadertoy/inputs"
+	"github.com/richinsley/goshadertoy/options"
 )
 
-// #cgo CFLAGS: -I../shmframe
-// #include "protocol.h"
-// #include <string.h>
-import "C"
-
-// Frame represents a single rendered frame's data, ready for encoding.
-type Frame struct {
-	Pixels []byte
-	PTS    int64
-}
+// The local Frame struct is no longer needed here.
 
 type OffscreenRenderer struct {
 	fbo               uint32
@@ -44,21 +29,16 @@ type OffscreenRenderer struct {
 	yuvTextureIDs     [3]uint32
 }
 
-const numBuffers = 3 // Use a ring buffer with 3 slots for all modes
+const numBuffers = 3 // This is for PBOs, not the old SHM ring buffer
 
-// getFormatForBitDepth controls the pixel format for FFmpeg readback.
-func getFormatForBitDepth(bitDepth int) (glInternalFormat int32, glpixelFormat uint32, glpixelType uint32, ffmpegInPixFmt int, ffmpegOutPixFmt string) {
-	// Read pixels in a planar YUV format
-	ffmpegOutPixFmt = "yuv444p"
-
-	// AV_PIX_FMT_YUV444P 		5
-	// AV_PIX_FMT_YUV444P10LE	68
-	// AV_PIX_FMT_YUV444P10BE	67
+// getFormatForBitDepth controls the pixel format for readback.
+// The output is now always planar YUV.
+func getFormatForBitDepth(bitDepth int) (glInternalFormat int32, glpixelFormat uint32, glpixelType uint32) {
 	switch bitDepth {
 	case 10, 12:
-		return gl.R16UI, gl.RED_INTEGER, gl.UNSIGNED_SHORT, 68, "p010le"
+		return gl.R16UI, gl.RED_INTEGER, gl.UNSIGNED_SHORT
 	default: // 8-bit
-		return gl.R8UI, gl.RED_INTEGER, gl.UNSIGNED_BYTE, 5, "nv12"
+		return gl.R8UI, gl.RED_INTEGER, gl.UNSIGNED_BYTE
 	}
 }
 func NewOffscreenRenderer(width, height, bitDepth, numPBOs int) (*OffscreenRenderer, error) {
@@ -108,7 +88,7 @@ func NewOffscreenRenderer(width, height, bitDepth, numPBOs int) (*OffscreenRende
 	gl.BindFramebuffer(gl.FRAMEBUFFER, or.yuvFbo)
 	gl.GenTextures(3, &or.yuvTextureIDs[0])
 
-	yuvInternalFormat, yuvPixelFormat, yuvPixelType, _, _ := getFormatForBitDepth(bitDepth)
+	yuvInternalFormat, yuvPixelFormat, yuvPixelType := getFormatForBitDepth(bitDepth)
 
 	for i := 0; i < 3; i++ {
 		gl.BindTexture(gl.TEXTURE_2D, or.yuvTextureIDs[i])
@@ -127,7 +107,7 @@ func NewOffscreenRenderer(width, height, bitDepth, numPBOs int) (*OffscreenRende
 
 	// --- PBO Initialization ---
 	gl.GenBuffers(int32(len(or.pbos)), &or.pbos[0])
-	_, _, pixelType, _, _ := getFormatForBitDepth(bitDepth)
+	_, _, pixelType := getFormatForBitDepth(bitDepth)
 	var bytesPerPixel int
 	switch pixelType {
 	case gl.UNSIGNED_BYTE:
@@ -158,7 +138,7 @@ func (or *OffscreenRenderer) Destroy() {
 }
 
 func (or *OffscreenRenderer) readYUVPixelsAsync(width, height int) ([]byte, error) {
-	_, pixelFormat, pixelType, _, _ := getFormatForBitDepth(or.bitDepth)
+	_, pixelFormat, pixelType := getFormatForBitDepth(or.bitDepth)
 	var bytesPerPixel int
 	switch pixelType {
 	case gl.UNSIGNED_BYTE:
@@ -169,26 +149,30 @@ func (or *OffscreenRenderer) readYUVPixelsAsync(width, height int) ([]byte, erro
 		return nil, fmt.Errorf("unsupported pixel type")
 	}
 
-	bufferSize := width * height * bytesPerPixel
-	yuvData := make([]byte, bufferSize*3)
+	planeSize := width * height * bytesPerPixel
+	yuvData := make([]byte, planeSize*3) // Y, U, V planes concatenated
 
-	for i := 0; i < 3; i++ {
-		pboIndex := (or.pboIndex + i) % len(or.pbos)
+	// This logic implements triple-buffering with PBOs to avoid stalling the pipeline.
+	for i := 0; i < 3; i++ { // For each plane Y, U, V
+		currentPboIndex := (or.pboIndex + i) % len(or.pbos)
 		nextPboIndex := (or.pboIndex + i + 3) % len(or.pbos)
 
+		// 1. Issue read command for the current frame into the current PBO
 		gl.ReadBuffer(gl.COLOR_ATTACHMENT0 + uint32(i))
-		gl.BindBuffer(gl.PIXEL_PACK_BUFFER, or.pbos[pboIndex])
+		gl.BindBuffer(gl.PIXEL_PACK_BUFFER, or.pbos[currentPboIndex])
 		gl.ReadPixels(0, 0, int32(width), int32(height), pixelFormat, pixelType, nil)
 
+		// 2. Process the data from the *previous* frame's PBO (which should be ready now)
 		gl.BindBuffer(gl.PIXEL_PACK_BUFFER, or.pbos[nextPboIndex])
-		ptr := gl.MapBufferRange(gl.PIXEL_PACK_BUFFER, 0, bufferSize, gl.MAP_READ_BIT)
+		ptr := gl.MapBufferRange(gl.PIXEL_PACK_BUFFER, 0, planeSize, gl.MAP_READ_BIT)
 		if ptr == nil {
 			gl.BindBuffer(gl.PIXEL_PACK_BUFFER, 0)
 			return nil, fmt.Errorf("failed to map PBO for plane %d", i)
 		}
 
-		pixelData := (*[1 << 30]byte)(ptr)[:bufferSize:bufferSize]
-		copy(yuvData[i*bufferSize:], pixelData)
+		// Copy the data from the mapped PBO into our Go slice
+		pixelData := (*[1 << 30]byte)(ptr)[:planeSize:planeSize]
+		copy(yuvData[i*planeSize:], pixelData)
 
 		gl.UnmapBuffer(gl.PIXEL_PACK_BUFFER)
 	}
@@ -210,317 +194,6 @@ func findMicChannel(r *Renderer) *inputs.MicChannel {
 	return nil
 }
 
-func (r *Renderer) getArgs(options *options.ShaderOptions, ffmpegOutPixFmt string, hasAudio bool) (inputArgs, outputArgs ffmpeg.KwArgs) {
-	inputArgs = ffmpeg.KwArgs{
-		"f": "shm_demuxer",
-	}
-
-	outputArgs = ffmpeg.KwArgs{}
-
-	switch runtime.GOOS {
-	case "linux":
-		log.Println("Using Linux (NVENC) hardware acceleration.")
-		// use cuda for color conversion
-		outputArgs["vf"] = fmt.Sprintf("hwupload_cuda,scale_cuda=format=%s", ffmpegOutPixFmt)
-		if *options.Codec == "hevc" {
-			outputArgs["c:v"] = "hevc_nvenc"
-			outputArgs["preset"] = "p2"
-		} else {
-			outputArgs["c:v"] = "h264_nvenc"
-			outputArgs["preset"] = "p2"
-		}
-	case "darwin":
-		log.Println("Using macOS (VideoToolbox) hardware acceleration.")
-		if *options.Codec == "hevc" {
-			outputArgs["c:v"] = "hevc_videotoolbox"
-		} else {
-			outputArgs["c:v"] = "h264_videotoolbox"
-		}
-		outputArgs["pix_fmt"] = ffmpegOutPixFmt
-	default:
-		log.Println("Using software encoding pipeline (no hardware acceleration).")
-		if *options.Codec == "hevc" {
-			outputArgs["c:v"] = "libx265"
-		} else {
-			outputArgs["c:v"] = "libx264"
-			outputArgs["pix_fmt"] = ffmpegOutPixFmt
-		}
-	}
-
-	if hasAudio {
-		outputArgs["c:a"] = "aac"
-		outputArgs["b:a"] = "192k"
-	}
-
-	if *options.BitDepth > 8 {
-		outputArgs["color_primaries"] = "bt2020"
-		outputArgs["color_trc"] = "smpte2084" // PQ
-		outputArgs["colorspace"] = "bt2020nc"
-	}
-	outputArgs["b:v"] = "25M"
-
-	if *options.Codec == "hevc" && (*options.OutputFile)[len(*options.OutputFile)-4:] == ".mp4" {
-		outputArgs["tag:v"] = "hvc1"
-	}
-	if *options.Mode == "stream" {
-		outputArgs["f"] = "mpegts"
-	}
-	return
-}
-
-func (r *Renderer) runEncoder(options *options.ShaderOptions, frameChan <-chan *Frame, audioChan <-chan []float32, doneChan chan<- error) {
-	pid := os.Getpid()
-
-	// Shared memory and semaphore setup
-	videoShmNameStr := fmt.Sprintf("goshadertoy_video_%d", pid)
-	videoEmptySemName := fmt.Sprintf("goshadertoy_video_empty_%d", pid)
-	videoFullSemName := fmt.Sprintf("goshadertoy_video_full_%d", pid)
-	audioShmNameStr := fmt.Sprintf("goshadertoy_audio_%d", pid)
-	audioEmptySemName := fmt.Sprintf("goshadertoy_audio_empty_%d", pid)
-	audioFullSemName := fmt.Sprintf("goshadertoy_audio_full_%d", pid)
-
-	semaphore.RemoveSemaphore(videoEmptySemName)
-	semaphore.RemoveSemaphore(videoFullSemName)
-	semaphore.RemoveSemaphore(audioEmptySemName)
-	semaphore.RemoveSemaphore(audioFullSemName)
-
-	bytesPerPixel := 1
-	if r.offscreenRenderer.bitDepth > 8 {
-		bytesPerPixel = 2
-	}
-	videoFrameSize := *options.Width * *options.Height * bytesPerPixel * 3
-	videoShmSize := int(unsafe.Sizeof(C.SHMControlBlock{})) + (videoFrameSize * numBuffers)
-	videoShm, err := sharedmemory.CreateSharedMemory(videoShmNameStr, videoShmSize)
-	if err != nil {
-		doneChan <- fmt.Errorf("failed to create video shared memory: %w", err)
-		return
-	}
-	defer videoShm.Close()
-
-	var audioShm *sharedmemory.SharedMemory
-	if audioChan != nil {
-		audioFrameSize := 4096 // 1024 samples * 4 bytes/sample
-		audioShmSize := int(unsafe.Sizeof(C.SHMControlBlock{})) + (audioFrameSize * numBuffers)
-		audioShm, err = sharedmemory.CreateSharedMemory(audioShmNameStr, audioShmSize)
-		if err != nil {
-			doneChan <- fmt.Errorf("failed to create audio shared memory: %w", err)
-			return
-		}
-		defer audioShm.Close()
-	}
-
-	videoEmptySem, err := semaphore.NewSemaphore(videoEmptySemName, numBuffers)
-	if err != nil {
-		doneChan <- fmt.Errorf("failed to create video empty semaphore: %w", err)
-		return
-	}
-	defer videoEmptySem.Close()
-	defer semaphore.RemoveSemaphore(videoEmptySemName)
-
-	videoFullSem, err := semaphore.NewSemaphore(videoFullSemName, 0)
-	if err != nil {
-		doneChan <- fmt.Errorf("failed to create video full semaphore: %w", err)
-		return
-	}
-	defer videoFullSem.Close()
-	defer semaphore.RemoveSemaphore(videoFullSemName)
-
-	var audioEmptySem, audioFullSem semaphore.Semaphore
-	if audioChan != nil {
-		audioEmptySem, err = semaphore.NewSemaphore(audioEmptySemName, numBuffers)
-		if err != nil {
-			doneChan <- fmt.Errorf("failed to create audio empty semaphore: %w", err)
-			return
-		}
-		defer audioEmptySem.Close()
-		defer semaphore.RemoveSemaphore(audioEmptySemName)
-
-		audioFullSem, err = semaphore.NewSemaphore(audioFullSemName, 0)
-		if err != nil {
-			doneChan <- fmt.Errorf("failed to create audio full semaphore: %w", err)
-			return
-		}
-		defer audioFullSem.Close()
-		defer semaphore.RemoveSemaphore(audioFullSemName)
-	}
-
-	videoControlBlockPtr := (*C.SHMControlBlock)(videoShm.GetPtr())
-	videoControlBlockPtr.num_buffers = numBuffers
-	videoControlBlockPtr.eof = 0
-	var videoWriteIndex uint32 = 0
-
-	var audioControlBlockPtr *C.SHMControlBlock
-	if audioChan != nil {
-		audioControlBlockPtr = (*C.SHMControlBlock)(audioShm.GetPtr())
-		audioControlBlockPtr.num_buffers = numBuffers
-		audioControlBlockPtr.eof = 0
-	}
-	var audioWriteIndex uint32 = 0
-	var audioPTS int64 = 0
-	internalAudioBuffer := make([]byte, 4096*4)
-	internalAudioBufferOccupancy := 0
-
-	// FFmpeg setup with a single pipe
-	pipeReader, pipeWriter := io.Pipe()
-	_, _, _, ffmpegInPixFmt, ffmpegOutPixFmt := getFormatForBitDepth(r.offscreenRenderer.bitDepth)
-	inputArgs, outputArgs := r.getArgs(options, ffmpegOutPixFmt, audioChan != nil)
-
-	ffmpegCmd := ffmpeg.Input("pipe:", inputArgs).
-		Output(*options.OutputFile, outputArgs).
-		OverWriteOutput().WithInput(pipeReader).ErrorToStdOut()
-
-	if *options.FFMPEGPath != "" {
-		ffmpegCmd = ffmpegCmd.SetFfmpegPath(*options.FFMPEGPath)
-	}
-
-	errc := make(chan error, 1)
-	go func() {
-		errc <- ffmpegCmd.Run()
-	}()
-
-	// Write a single header for both streams
-	header := C.SHMHeader{
-		version:    1,
-		width:      C.uint32_t(*options.Width),
-		height:     C.uint32_t(*options.Height),
-		frame_rate: C.uint32_t(*options.FPS),
-		pix_fmt:    C.int32_t(ffmpegInPixFmt),
-	}
-
-	if audioChan != nil {
-		header.stream_count = 2
-		header.sample_rate = 44100
-		header.channels = 2
-		header.bit_depth = 32
-		C.strncpy((*C.char)(unsafe.Pointer(&header.shm_file_audio[0])), C.CString("/"+audioShmNameStr), 511)
-		C.strncpy((*C.char)(unsafe.Pointer(&header.empty_sem_name_audio[0])), C.CString(audioEmptySemName), 255)
-		C.strncpy((*C.char)(unsafe.Pointer(&header.full_sem_name_audio[0])), C.CString(audioFullSemName), 255)
-	} else {
-		header.stream_count = 1
-	}
-
-	C.strncpy((*C.char)(unsafe.Pointer(&header.shm_file_video[0])), C.CString("/"+videoShmNameStr), 511)
-	C.strncpy((*C.char)(unsafe.Pointer(&header.empty_sem_name_video[0])), C.CString(videoEmptySemName), 255)
-	C.strncpy((*C.char)(unsafe.Pointer(&header.full_sem_name_video[0])), C.CString(videoFullSemName), 255)
-
-	headerBytes := (*[unsafe.Sizeof(header)]byte)(unsafe.Pointer(&header))[:]
-	if _, err := pipeWriter.Write(headerBytes); err != nil {
-		doneChan <- fmt.Errorf("failed to write header to FFmpeg: %w", err)
-		return
-	}
-
-	// Main encoding loop
-	for {
-		select {
-		case frame, ok := <-frameChan:
-			if !ok {
-				frameChan = nil
-			} else {
-				if err := videoEmptySem.Acquire(); err != nil {
-					log.Printf("Error acquiring video empty semaphore: %v", err)
-					break
-				}
-
-				writeOffset := int64(unsafe.Sizeof(C.SHMControlBlock{})) + (int64(videoWriteIndex) * int64(videoFrameSize))
-				if _, err := videoShm.WriteAt(frame.Pixels, writeOffset); err != nil {
-					log.Printf("Error writing pixel data on frame %d: %v", frame.PTS, err)
-					break
-				}
-
-				frameHeader := C.FrameHeader{
-					cmdtype: C.uint32_t(0),
-					size:    C.uint32_t(len(frame.Pixels)),
-					pts:     C.int64_t(frame.PTS),
-					offset:  C.uint64_t(writeOffset),
-				}
-				frameHeaderBytes := (*[unsafe.Sizeof(frameHeader)]byte)(unsafe.Pointer(&frameHeader))[:]
-				if _, err := pipeWriter.Write(frameHeaderBytes); err != nil {
-					log.Printf("Error writing frame header to pipe on frame %d: %v", frame.PTS, err)
-					break
-				}
-
-				videoWriteIndex = (videoWriteIndex + 1) % numBuffers
-
-				if err := videoFullSem.Release(); err != nil {
-					log.Printf("Error releasing video full semaphore: %v", err)
-					break
-				}
-			}
-
-		case audioData, ok := <-audioChan:
-			if !ok {
-				audioChan = nil
-			} else {
-				if len(audioData) > 0 {
-					audioFrameSize := 4096
-					byteData := (*[1 << 30]byte)(unsafe.Pointer(&audioData[0]))[: len(audioData)*4 : len(audioData)*4]
-
-					// Only increment occupancy by the number of bytes actually copied.
-					bytesCopied := copy(internalAudioBuffer[internalAudioBufferOccupancy:], byteData)
-					internalAudioBufferOccupancy += bytesCopied
-
-					// If the buffer was full, log a warning that data was dropped.
-					if bytesCopied < len(byteData) {
-						log.Printf("Warning: Encoder audio buffer overflow. Dropped %d bytes.", len(byteData)-bytesCopied)
-					}
-
-					for internalAudioBufferOccupancy >= audioFrameSize {
-						if err := audioEmptySem.Acquire(); err != nil {
-							log.Printf("Error acquiring audio empty semaphore: %v", err)
-							break
-						}
-						writeOffset := int64(unsafe.Sizeof(C.SHMControlBlock{})) + (int64(audioWriteIndex) * int64(audioFrameSize))
-						if _, err := audioShm.WriteAt(internalAudioBuffer[:audioFrameSize], writeOffset); err != nil {
-							audioEmptySem.Release()
-							log.Printf("Error writing audio data: %v", err)
-							break
-						}
-						frameHeader := C.FrameHeader{
-							cmdtype: C.uint32_t(1),
-							size:    C.uint32_t(audioFrameSize),
-							pts:     C.int64_t(audioPTS),
-							offset:  C.uint64_t(writeOffset),
-						}
-						audioPTS += 1024
-						frameHeaderBytes := (*[unsafe.Sizeof(frameHeader)]byte)(unsafe.Pointer(&frameHeader))[:]
-						if _, err := pipeWriter.Write(frameHeaderBytes); err != nil {
-							audioEmptySem.Release()
-							log.Printf("Error writing audio frame header: %v", err)
-							break
-						}
-						audioWriteIndex = (audioWriteIndex + 1) % numBuffers
-						internalAudioBufferOccupancy -= audioFrameSize
-						if internalAudioBufferOccupancy > 0 {
-							copy(internalAudioBuffer, internalAudioBuffer[audioFrameSize:audioFrameSize+internalAudioBufferOccupancy])
-						}
-						if err := audioFullSem.Release(); err != nil {
-							log.Printf("Error releasing audio full semaphore: %v", err)
-							break
-						}
-					}
-				}
-			}
-		}
-
-		if frameChan == nil && (audioChan == nil || audioShm == nil) {
-			break
-		}
-	}
-
-	videoControlBlockPtr.eof = 1
-	if audioControlBlockPtr != nil {
-		audioControlBlockPtr.eof = 1
-	}
-	eofHeader := C.FrameHeader{cmdtype: C.uint32_t(2)}
-	eofHeaderBytes := (*[unsafe.Sizeof(eofHeader)]byte)(unsafe.Pointer(&eofHeader))[:]
-	if _, err := pipeWriter.Write(eofHeaderBytes); err != nil {
-		log.Printf("Error writing EOF header to FFmpeg: %v", err)
-	}
-	pipeWriter.Close()
-
-	doneChan <- <-errc
-}
-
 func (r *Renderer) RunOffscreen(options *options.ShaderOptions) error {
 	if *options.Mode == "stream" {
 		return r.runStreamMode(options)
@@ -530,21 +203,18 @@ func (r *Renderer) RunOffscreen(options *options.ShaderOptions) error {
 
 func (r *Renderer) runStreamMode(options *options.ShaderOptions) error {
 	log.Println("Starting in stream mode...")
-	frameChan := make(chan *Frame, numBuffers)
-	var audioChan chan []float32
-	encoderDoneChan := make(chan error, 1)
+
+	ffEncoder, err := encoder.NewFFmpegEncoder(options)
+	if err != nil {
+		return fmt.Errorf("failed to create CGO encoder: %w", err)
+	}
+	go ffEncoder.Run()
 
 	hasAudio := r.audioDevice != nil && (*options.AudioInputFile != "" || *options.AudioInputDevice != "")
 	if hasAudio {
-		audioChan = make(chan []float32, 16)
-
-		// Bridge goroutine to pull from the shared buffer and push to the encoder's channel.
 		go func() {
-			// This goroutine will exit when the main program does. For more robust
-			// shutdown, a context passed from the caller would be ideal.
 			defer func() {
 				if r := recover(); r != nil {
-					// The channel may be closed by the encoder finishing early.
 					log.Printf("Recovered in audio bridge: %v", r)
 				}
 			}()
@@ -556,13 +226,11 @@ func (r *Renderer) runStreamMode(options *options.ShaderOptions) error {
 			for range ticker.C {
 				samples := r.audioDevice.GetBuffer().Read(samplesPerFrame)
 				if len(samples) > 0 {
-					audioChan <- samples
+					ffEncoder.SendAudio(samples)
 				}
 			}
 		}()
 	}
-
-	go r.runEncoder(options, frameChan, audioChan, encoderDoneChan)
 
 	if *options.Prewarm {
 		log.Println("Pre-warming renderer...")
@@ -578,16 +246,6 @@ func (r *Renderer) runStreamMode(options *options.ShaderOptions) error {
 	var frameCounter int64 = 0
 
 	for {
-		select {
-		case err := <-encoderDoneChan:
-			log.Printf("Encoder finished with error: %v", err)
-			if audioChan != nil {
-				close(audioChan)
-			}
-			return err
-		default:
-		}
-
 		elapsedTime := time.Since(startTime)
 		shouldHaveRendered := int64(float64(elapsedTime) / float64(frameDuration))
 
@@ -614,40 +272,31 @@ func (r *Renderer) runStreamMode(options *options.ShaderOptions) error {
 
 			if err != nil {
 				log.Printf("Error reading pixels on frame %d: %v", frameCounter, err)
-				close(frameChan)
-				return <-encoderDoneChan
+				return ffEncoder.Close()
 			}
 
-			select {
-			case frameChan <- &Frame{Pixels: pixels, PTS: frameCounter}:
-				frameCounter++
-			default:
-				log.Println("Warning: Frame channel is full. Dropping frame.")
-				frameCounter++
-			}
+			// CORRECTED: Use the public SendVideo method
+			ffEncoder.SendVideo(&encoder.Frame{Pixels: pixels, PTS: frameCounter})
+			frameCounter++
 		}
 	}
 }
 
 func (r *Renderer) runRecordMode(options *options.ShaderOptions) error {
-	log.Println("Starting in record mode...")
-	frameChan := make(chan *Frame, numBuffers)
-	var audioChan chan []float32
-	encoderDoneChan := make(chan error, 1)
+	log.Println("Starting in record mode with CGO encoder...")
 
-	micChannel := findMicChannel(r)
-	hasAudio := r.audioDevice != nil && (*options.AudioInputFile != "" || *options.AudioInputDevice != "")
-
-	if hasAudio {
-		audioChan = make(chan []float32, 16)
+	ffEncoder, err := encoder.NewFFmpegEncoder(options)
+	if err != nil {
+		return fmt.Errorf("failed to create CGO encoder: %w", err)
 	}
-
-	go r.runEncoder(options, frameChan, audioChan, encoderDoneChan)
+	go ffEncoder.Run()
 
 	totalFrames := int(*options.Duration * float64(*options.FPS))
 	timeStep := 1.0 / float64(*options.FPS)
 	sampleRate := r.audioDevice.SampleRate()
 	samplesPerFrame := sampleRate / *options.FPS
+	micChannel := findMicChannel(r)
+	hasAudio := r.audioDevice != nil && (*options.AudioInputFile != "" || *options.AudioInputDevice != "")
 
 	for i := 0; i < totalFrames; i++ {
 		currentTime := float64(i) * timeStep
@@ -659,23 +308,17 @@ func (r *Renderer) runRecordMode(options *options.ShaderOptions) error {
 		}
 
 		if hasAudio {
-			// 1. Ensure enough audio is decoded for the current frame
 			targetSample := int64((currentTime + timeStep) * float64(sampleRate))
-			available := r.audioDevice.GetBuffer().AvailableSamples()
-			if samplesPerFrame > int(available) {
+			if samplesPerFrame > int(r.audioDevice.GetBuffer().AvailableSamples()) {
 				r.audioDevice.DecodeUntil(targetSample)
 			}
 
-			// 2. Pull the stereo audio for this frame from the buffer
-			// The number of stereo samples is samplesPerFrame, so the slice length is *2
 			stereoSamples := r.audioDevice.GetBuffer().Read(samplesPerFrame * 2)
-
-			// 3. Send the stereo audio to the encoder
 			if len(stereoSamples) > 0 {
-				audioChan <- stereoSamples
+				// CORRECTED: Use the public SendAudio method
+				ffEncoder.SendAudio(stereoSamples)
 			}
 
-			// 4. If there's a mic channel, downmix and process the audio for FFT
 			if micChannel != nil {
 				fftStereoChunk := r.audioDevice.GetBuffer().WindowPeek()
 				monoSamples := audio.DownmixStereoToMono(fftStereoChunk)
@@ -683,11 +326,9 @@ func (r *Renderer) runRecordMode(options *options.ShaderOptions) error {
 			}
 		}
 
-		// 5. Render the video frame. This will call micChannel.Update() to upload the texture.
 		r.RenderFrame(currentTime, int32(i), [4]float32{0, 0, 0, 0}, uniforms)
 		r.RenderToYUV()
 
-		// 6. Send the video frame to the encoder
 		gl.BindFramebuffer(gl.READ_FRAMEBUFFER, r.offscreenRenderer.yuvFbo)
 		pixels, err := r.offscreenRenderer.readYUVPixelsAsync(*options.Width, *options.Height)
 		gl.BindFramebuffer(gl.READ_FRAMEBUFFER, 0)
@@ -695,13 +336,9 @@ func (r *Renderer) runRecordMode(options *options.ShaderOptions) error {
 			log.Printf("Error reading pixels on frame %d: %v", i, err)
 			break
 		}
-		frameChan <- &Frame{Pixels: pixels, PTS: int64(i)}
+		// CORRECTED: Use the public SendVideo method
+		ffEncoder.SendVideo(&encoder.Frame{Pixels: pixels, PTS: int64(i)})
 	}
 
-	close(frameChan)
-	if audioChan != nil {
-		close(audioChan)
-	}
-
-	return <-encoderDoneChan
+	return ffEncoder.Close()
 }
