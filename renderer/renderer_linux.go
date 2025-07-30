@@ -7,7 +7,7 @@ import (
 	"runtime"
 
 	gl "github.com/go-gl/gl/v4.1-core/gl"
-	"github.com/richinsley/goshadertoy/audio"
+	audio "github.com/richinsley/goshadertoy/audio"
 	glfwcontext "github.com/richinsley/goshadertoy/glfwcontext"
 	headless "github.com/richinsley/goshadertoy/headless"
 	inputs "github.com/richinsley/goshadertoy/inputs"

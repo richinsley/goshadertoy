@@ -22,12 +22,40 @@ package arcana
 #include <libpostproc/postprocess.h>
 #include <libswresample/swresample.h>
 #include <libswscale/swscale.h>
+#include <stdio.h>
+
+// A simple C log callback that prints directly to stderr.
+static void simple_log_callback(void* ptr, int level, const char* fmt, va_list vl) {
+    // To prevent FFmpeg's verbose logs from cluttering the console,
+    // we can filter to only show important messages.
+    // AV_LOG_INFO is a good balance. For more detail, use AV_LOG_DEBUG.
+    if (level > AV_LOG_DEBUG) {
+        return;
+    }
+
+    // Prepend a tag to identify FFmpeg logs and print to standard error.
+    fprintf(stderr, "[FFmpeg] ");
+    vfprintf(stderr, fmt, vl);
+}
+
+// Function to set the callback
+static void set_log_callback() {
+    av_log_set_callback(simple_log_callback);
+}
 */
 import "C"
 import "fmt"
 
-func init() {
+func Platform_init() {
+	// Set the log level. AV_LOG_INFO is a good default.
+	// Use AV_LOG_DEBUG for more verbose output when needed.
+	C.av_log_set_level(C.AV_LOG_INFO)
+	// Set our simple C function as the callback
+	C.set_log_callback()
+
+	// Register all available device muxers and demuxers
 	C.avdevice_register_all()
+
 	fmt.Printf("libavcodec version:    %d\n", uint(C.avcodec_version()))
 	fmt.Printf("libavformat version:   %d\n", uint(C.avformat_version()))
 	fmt.Printf("libavutil version:     %d\n", uint(C.avutil_version()))
