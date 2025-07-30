@@ -40,14 +40,16 @@ type Frame struct {
 
 // FFmpegEncoder handles the in-process video and audio encoding using FFmpeg libraries.
 type FFmpegEncoder struct {
-	formatCtx     *C.AVFormatContext
-	videoCodecCtx *C.AVCodecContext
-	audioCodecCtx *C.AVCodecContext
-	videoStream   *C.AVStream
-	audioStream   *C.AVStream
-	swsCtx        *C.struct_SwsContext
-	videoFrame    *C.AVFrame
-	audioFrame    *C.AVFrame
+	formatCtx            *C.AVFormatContext
+	videoCodecCtx        *C.AVCodecContext
+	audioCodecCtx        *C.AVCodecContext
+	videoStream          *C.AVStream
+	audioStream          *C.AVStream
+	swsCtx               *C.struct_SwsContext
+	videoFrame           *C.AVFrame
+	audioFrame           *C.AVFrame
+	videoFrameBuffer     unsafe.Pointer // Reusable buffer for video frames
+	videoFrameBufferSize int            // Size of the reusable buffer
 
 	opts        *options.ShaderOptions
 	videoFrames chan *Frame
@@ -112,7 +114,7 @@ func NewFFmpegEncoder(opts *options.ShaderOptions) (*FFmpegEncoder, error) {
 	e := &FFmpegEncoder{
 		opts:        opts,
 		videoFrames: make(chan *Frame, 5),
-		audioFrames: make(chan []float32, 16),
+		// audioFrames: make(chan []float32, 16),
 		done:        make(chan error, 1),
 	}
 
@@ -146,12 +148,33 @@ func NewFFmpegEncoder(opts *options.ShaderOptions) (*FFmpegEncoder, error) {
 		if err := e.addStream(&e.audioStream, &e.audioCodecCtx, audioCodec); err != nil {
 			return nil, fmt.Errorf("failed to add audio stream: %w", err)
 		}
+		e.audioFrames = make(chan []float32, 16)
+	} else {
+		// No audio stream needed, set to nil
+		e.audioStream = nil
+		e.audioCodecCtx = nil
 	}
 
 	// 4. Open codecs
 	if err := e.openVideo(videoCodec, videoCodecName, opts); err != nil {
 		return nil, err
 	}
+
+	// --- Allocate the reusable C buffer for video frames ---
+	width := int(*opts.Width)
+	height := int(*opts.Height)
+	bytesPerPixel := 1
+	if *opts.BitDepth > 8 {
+		bytesPerPixel = 2
+	}
+	// The input format is YUV planar, so we need space for 3 planes.
+	e.videoFrameBufferSize = width * height * bytesPerPixel * 3
+	e.videoFrameBuffer = C.malloc(C.size_t(e.videoFrameBufferSize))
+	if e.videoFrameBuffer == nil {
+		e.cleanup() // Ensure other resources are freed on failure
+		return nil, fmt.Errorf("could not allocate reusable video frame buffer")
+	}
+
 	if hasAudio {
 		if err := e.openAudio(audioCodec, opts); err != nil {
 			return nil, err
@@ -338,24 +361,21 @@ func (e *FFmpegEncoder) encodeVideo(frameData *Frame) {
 	}
 	planeSize := width * height * bytesPerPixel
 
-	// The array of pointers (`srcPlanes`) must be allocated in C memory to avoid issues
-	// with Go's garbage collector moving the array while C code is using it.
+	// 1. Copy Go pixel data into our pre-allocated C buffer.
+	// This is much faster than allocating new C memory on every frame.
+	C.memcpy(e.videoFrameBuffer, unsafe.Pointer(&frameData.Pixels[0]), C.size_t(len(frameData.Pixels)))
+
 	srcPlanes := (**C.uchar)(C.malloc(C.size_t(unsafe.Sizeof((*C.uchar)(nil)) * 4)))
 	defer C.free(unsafe.Pointer(srcPlanes))
 
-	// Create a Go slice header to easily access the C-allocated array
 	srcPlanesSlice := (*[4]*C.uchar)(unsafe.Pointer(srcPlanes))
 
-	// Get the base pointer of the Go pixel data
-	pixelsPtr := unsafe.Pointer(&frameData.Pixels[0])
-
-	// Fill the C array with pointers to the start of each plane within the Go slice
-	srcPlanesSlice[0] = (*C.uchar)(pixelsPtr)
-	srcPlanesSlice[1] = (*C.uchar)(unsafe.Add(pixelsPtr, planeSize))
-	srcPlanesSlice[2] = (*C.uchar)(unsafe.Add(pixelsPtr, planeSize*2))
+	// 2. Point the plane pointers to the appropriate locations in our stable C buffer.
+	srcPlanesSlice[0] = (*C.uchar)(e.videoFrameBuffer)
+	srcPlanesSlice[1] = (*C.uchar)(unsafe.Add(e.videoFrameBuffer, planeSize))
+	srcPlanesSlice[2] = (*C.uchar)(unsafe.Add(e.videoFrameBuffer, planeSize*2))
 	srcPlanesSlice[3] = nil
 
-	// The strides array can safely be on the Go stack as it contains no pointers.
 	srcStrides := [4]C.int{
 		C.int(width * bytesPerPixel),
 		C.int(width * bytesPerPixel),
@@ -363,7 +383,6 @@ func (e *FFmpegEncoder) encodeVideo(frameData *Frame) {
 		0,
 	}
 
-	// Perform the scaling/conversion
 	C.sws_scale(e.swsCtx, srcPlanes, &srcStrides[0], 0, C.int(height),
 		&e.videoFrame.data[0], &e.videoFrame.linesize[0])
 
@@ -394,20 +413,32 @@ func (e *FFmpegEncoder) encode(st *C.AVStream, ctx *C.AVCodecContext, frame *C.A
 	pkt := C.av_packet_alloc()
 	defer C.av_packet_free(&pkt)
 
+	// Send the frame to the encoder.
+	// If frame is nil, this is a flush signal.
 	if C.avcodec_send_frame(ctx, frame) < 0 {
 		log.Println("Error sending frame to encoder")
 		return
 	}
 
+	// Loop to receive all available output packets.
 	for {
 		ret := C.avcodec_receive_packet(ctx, pkt)
-		if ret == C.AVERROR_EOF || ret == C.averror(C.EAGAIN) {
+		if ret == C.averror(C.EAGAIN) {
+			// The encoder needs more input to produce output. In flush mode (frame is nil),
+			// this simply means we need to call receive_packet again.
+			// In normal mode, we would break and send the next frame.
+			// Since this function handles both cases, we just break here.
+			// The outer Run() loop will handle the next step.
+			break
+		} else if ret == C.AVERROR_EOF {
+			// The encoder has been fully flushed.
 			break
 		} else if ret < 0 {
 			log.Printf("Error during encoding: %s", C.GoString(C.av_error_str(ret)))
-			break
+			break // Stop on a real error.
 		}
 
+		// A packet was successfully received, so write it to the output file.
 		C.av_packet_rescale_ts(pkt, ctx.time_base, st.time_base)
 		pkt.stream_index = st.index
 
@@ -415,6 +446,12 @@ func (e *FFmpegEncoder) encode(st *C.AVStream, ctx *C.AVCodecContext, frame *C.A
 			log.Println("Error writing packet")
 		}
 		C.av_packet_unref(pkt)
+
+		// After flushing with a nil frame, we must continue calling
+		// receive_packet until it returns AVERROR_EOF.
+		if frame == nil {
+			continue
+		}
 	}
 }
 
@@ -437,6 +474,12 @@ func (e *FFmpegEncoder) Close() error {
 }
 
 func (e *FFmpegEncoder) cleanup() {
+	if e.videoFrameBuffer != nil {
+		C.free(e.videoFrameBuffer)
+	}
+	if e.videoFrame != nil {
+		C.av_frame_free(&e.videoFrame)
+	}
 	if e.videoFrame != nil {
 		C.av_frame_free(&e.videoFrame)
 	}

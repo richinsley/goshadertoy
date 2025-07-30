@@ -315,7 +315,6 @@ func (r *Renderer) runRecordMode(options *options.ShaderOptions) error {
 
 			stereoSamples := r.audioDevice.GetBuffer().Read(samplesPerFrame * 2)
 			if len(stereoSamples) > 0 {
-				// CORRECTED: Use the public SendAudio method
 				ffEncoder.SendAudio(stereoSamples)
 			}
 
@@ -326,6 +325,7 @@ func (r *Renderer) runRecordMode(options *options.ShaderOptions) error {
 			}
 		}
 
+		fmt.Println("Rendering frame", i, "at time", currentTime)
 		r.RenderFrame(currentTime, int32(i), [4]float32{0, 0, 0, 0}, uniforms)
 		r.RenderToYUV()
 
@@ -336,7 +336,6 @@ func (r *Renderer) runRecordMode(options *options.ShaderOptions) error {
 			log.Printf("Error reading pixels on frame %d: %v", i, err)
 			break
 		}
-		// CORRECTED: Use the public SendVideo method
 		ffEncoder.SendVideo(&encoder.Frame{Pixels: pixels, PTS: int64(i)})
 	}
 
