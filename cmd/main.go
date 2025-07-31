@@ -91,7 +91,6 @@ func main() {
 	options.Height = flag.Int("height", 720, "Height of the output")
 	options.BitDepth = flag.Int("bitdepth", 8, "Bit depth for recording (8, 10, or 12)")
 	options.OutputFile = flag.String("output", "output.mp4", "Output file name for recording")
-	options.FFMPEGPath = flag.String("ffmpeg", "", "Path to ffmpeg executable")
 	options.Codec = flag.String("codec", "h264", "Video codec for encoding: h264, hevc (default: h264)")
 	options.DecklinkDevice = flag.String("decklink", "", "DeckLink device name for output")
 	options.NumPBOs = flag.Int("numpbos", 2, "Number of PBOs to use for streaming")

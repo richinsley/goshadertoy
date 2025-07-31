@@ -11,7 +11,6 @@ type ShaderOptions struct {
 	Height            *int
 	BitDepth          *int
 	OutputFile        *string
-	FFMPEGPath        *string
 	DecklinkDevice    *string
 	Codec             *string
 	NumPBOs           *int
