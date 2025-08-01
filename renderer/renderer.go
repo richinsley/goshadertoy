@@ -6,6 +6,7 @@ import (
 	"log"
 	"strings"
 	"time"
+	"runtime"
 
 	gl "github.com/go-gl/gl/v4.1-core/gl"
 	api "github.com/richinsley/goshadertoy/api"
@@ -37,11 +38,9 @@ type RenderPass struct {
 }
 
 func (r *Renderer) isGLES() bool {
-	// isGLES implicitly handled by which files are compiled.
-	// We can check if context is nil as a proxy.
-	// On Linux, context is nil in headless mode.
-	// On other platforms, context is never nil.
-	return r.context == nil
+	// In record mode on Linux, we use a headless EGL context which uses GLES.
+	// For all other cases (interactive mode or other OSes), we use GLFW with desktop GL.
+	return r.recordMode && runtime.GOOS == "linux"
 }
 
 func (r *Renderer) GetRenderPass(name string, shaderArgs *api.ShaderArgs, options *options.ShaderOptions) (*RenderPass, error) {

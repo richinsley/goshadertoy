@@ -8,8 +8,8 @@ import (
 
 	gl "github.com/go-gl/gl/v4.1-core/gl"
 	audio "github.com/richinsley/goshadertoy/audio"
+	graphics "github.com/richinsley/goshadertoy/graphics"
 	inputs "github.com/richinsley/goshadertoy/inputs"
-	graphics "github.comcom/richinsley/goshadertoy/graphics"
 )
 
 // Add a package-level variable to ensure gl.Init() is called only once.

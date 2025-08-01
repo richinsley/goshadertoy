@@ -12,80 +12,68 @@ import (
 	"github.com/richinsley/goshadertoy/arcana"
 	"github.com/richinsley/goshadertoy/audio"
 	"github.com/richinsley/goshadertoy/glfwcontext"
+	headless "github.com/richinsley/goshadertoy/headless"
+	graphics "github.com/richinsley/goshadertoy/graphics"
 	options "github.com/richinsley/goshadertoy/options"
 	renderer "github.com/richinsley/goshadertoy/renderer"
 )
 
 func runShadertoy(shaderArgs *api.ShaderArgs, options *options.ShaderOptions) {
-	arcana.Init()
+	arcana.Init() // Initialize Arcana for FFmpeg support
 
-	// Initialize GLFW on the main thread
-	if err := glfwcontext.InitGraphics(); err != nil {
-		log.Fatalf("Failed to initialize graphics: %v", err)
-	}
-	defer glfwcontext.TerminateGraphics()
-
-	// --- Create Contexts ---
-	// The main visual context (visible window)
-	visualContext, err := glfwcontext.New(*options.Width, *options.Height, true, nil)
-	if err != nil {
-		log.Fatalf("Failed to create visual context: %v", err)
-	}
-
-	// The sound renderer context (hidden window, shares resources with visual context)
-	// NOTE: Sharing contexts is important for performance and resource management.
-	// soundContext, err := glfwcontext.New(1, 1, false, visualContext.Window())
-	// if err != nil {
-	// 	log.Fatalf("Failed to create sound context: %v", err)
-	// }
-
-	// --- Create Audio Device ---
+	// Create the single audio device here.
 	audioDevice, err := audio.NewFFmpegAudioDevice(options)
 	if err != nil {
 		log.Fatalf("Failed to create audio device: %v", err)
 	}
 	defer audioDevice.Stop()
 
-	// --- Create Renderers ---
 	mode := *options.Mode
 	isRecord := mode == "record" || mode == "stream"
 
-	// Create the main visual renderer
-	r, err := renderer.NewRenderer(*options.Width, *options.Height, !isRecord, *options.BitDepth, *options.NumPBOs, audioDevice, visualContext)
+	// --- CONTEXT CREATION ---
+	// This block now correctly chooses the context type.
+	var visualContext graphics.Context
+	if isRecord && runtime.GOOS == "linux" {
+		log.Println("Record mode on Linux detected. Using headless EGL context.")
+		visualContext, err = headless.NewHeadless(*options.Width, *options.Height)
+		if err != nil {
+			log.Fatalf("Failed to create headless EGL context: %v", err)
+		}
+	} else {
+		log.Println("Using GLFW context for interactive mode or non-Linux OS.")
+		if err := glfwcontext.InitGraphics(); err != nil {
+			log.Fatalf("Failed to initialize graphics: %v", err)
+		}
+		// Defer termination until the function exits
+		defer glfwcontext.TerminateGraphics()
+
+		visualContext, err = glfwcontext.New(*options.Width, *options.Height, !isRecord, nil)
+		if err != nil {
+			log.Fatalf("Failed to create visual GLFW context: %v", err)
+		}
+	}
+
+	// Initialize renderer with the created context
+	r, err := renderer.NewRenderer(*options.Width, *options.Height, isRecord, *options.BitDepth, *options.NumPBOs, audioDevice, visualContext)
 	if err != nil {
 		log.Fatalf("Failed to create renderer: %v", err)
 	}
 	defer r.Shutdown()
 
+	// Initialize the scene with shaders and channels
 	err = r.InitScene(shaderArgs, options)
 	if err != nil {
 		log.Fatalf("Failed to initialize scene: %v", err)
 	}
 
-	/*
-		// --- Sound Shader Setup ---
-		soundShaderCode := "" // TODO: Load this from shaderArgs if a sound pass exists
-		if soundShaderCode != "" {
-			soundRenderer, err := renderer.NewSoundShaderRenderer(soundContext, audioDevice.GetBuffer(), soundShaderCode)
-			if err != nil {
-				log.Fatalf("Failed to create sound renderer: %v", err)
-			}
-
-			// Run the sound renderer in its own goroutine
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			go soundRenderer.Run(ctx)
-		}
-	*/
-
-	// --- Start Main Loop ---
+	// Start the audio device now that the scene (and mic channel) is initialized.
 	if err := audioDevice.Start(); err != nil {
 		log.Fatalf("Failed to start audio device: %v", err)
 	}
 
 	switch mode {
 	case "record":
-		// Start the offscreen render loop
 		log.Println("Starting offscreen render loop...")
 		err = r.RunOffscreen(options)
 		if err != nil {
@@ -93,7 +81,6 @@ func runShadertoy(shaderArgs *api.ShaderArgs, options *options.ShaderOptions) {
 		}
 		log.Printf("Successfully rendered to %s", *options.OutputFile)
 	case "stream":
-		// Add streaming logic here
 		log.Println("Starting streaming mode...")
 		err = r.RunOffscreen(options)
 		if err != nil {
@@ -102,7 +89,6 @@ func runShadertoy(shaderArgs *api.ShaderArgs, options *options.ShaderOptions) {
 	case "live":
 		fallthrough
 	default:
-		// Start the interactive render loop
 		log.Println("Starting interactive render loop...")
 		r.Run()
 	}
