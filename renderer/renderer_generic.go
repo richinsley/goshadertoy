@@ -4,16 +4,20 @@ package renderer
 
 import (
 	"fmt"
+	"sync" // Import the sync package
 
 	gl "github.com/go-gl/gl/v4.1-core/gl"
 	"github.com/richinsley/goshadertoy/audio"
-	glfwcontext "github.com/richinsley/goshadertoy/glfwcontext"
+	"github.com/richinsley/goshadertoy/graphics"
 	inputs "github.com/richinsley/goshadertoy/inputs"
 )
 
+// Add the same sync.Once variable here.
+var glInitOnce sync.Once
+
 // Renderer struct for non-Linux platforms.
 type Renderer struct {
-	context           *glfwcontext.Context
+	context           graphics.Context
 	quadVAO           uint32
 	bufferPasses      []*RenderPass
 	namedPasses       map[string]*RenderPass
@@ -28,12 +32,13 @@ type Renderer struct {
 	audioDevice       audio.AudioDevice
 }
 
-func NewRenderer(width, height int, visible bool, bitDepth int, numPBOs int, ad audio.AudioDevice) (*Renderer, error) {
+func NewRenderer(width, height int, recordMode bool, bitDepth int, numPBOs int, ad audio.AudioDevice, ctx graphics.Context) (*Renderer, error) {
 	r := &Renderer{
 		width:       width,
 		height:      height,
-		recordMode:  !visible,
+		recordMode:  recordMode,
 		audioDevice: ad,
+		context:     ctx,
 	}
 	var err error
 
@@ -41,10 +46,16 @@ func NewRenderer(width, height int, visible bool, bitDepth int, numPBOs int, ad 
 	r.bufferPasses = make([]*RenderPass, 0)
 	r.buffers = make(map[string]*inputs.Buffer)
 
-	// On non-Linux platforms, always use GLFW.
-	r.context, err = glfwcontext.New(width, height, visible)
-	if err != nil {
-		return nil, fmt.Errorf("failed to initialize graphics context: %w", err)
+	// Make the context current on this thread.
+	r.context.MakeCurrent()
+
+	// Use the sync.Once to safely initialize OpenGL bindings.
+	var initErr error
+	glInitOnce.Do(func() {
+		initErr = gl.Init()
+	})
+	if initErr != nil {
+		return nil, fmt.Errorf("failed to initialize OpenGL: %w", initErr)
 	}
 
 	r.offscreenRenderer, err = NewOffscreenRenderer(r.width, r.height, bitDepth, numPBOs)
@@ -56,6 +67,7 @@ func NewRenderer(width, height int, visible bool, bitDepth int, numPBOs int, ad 
 }
 
 func (r *Renderer) Shutdown() {
+	// The context itself will be shut down by the manager
 	for _, pass := range r.namedPasses {
 		gl.DeleteProgram(pass.shaderProgram)
 	}
@@ -77,7 +89,4 @@ func (r *Renderer) Shutdown() {
 		r.offscreenRenderer.Destroy()
 	}
 	gl.DeleteVertexArrays(1, &r.quadVAO)
-	if r.context != nil {
-		r.context.Shutdown()
-	}
 }

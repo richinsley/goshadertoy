@@ -181,8 +181,6 @@ void main() { fragColor = texture(u_texture, frag_uv); }
 `
 
 // GenerateSoundShaderSource creates the full WebGL source for a sound shader.
-// It does not depend on the inputs package, breaking the import cycle.
-// GenerateSoundShaderSource creates the full WebGL source for a sound shader.
 func GenerateSoundShaderSource(commonCode, soundShader string, channels []inputs.IChannel) string {
 	// The preamble includes all standard uniforms a sound shader might need.
 	preamble := `#version 300 es

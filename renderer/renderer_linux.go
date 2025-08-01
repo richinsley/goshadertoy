@@ -4,19 +4,20 @@ package renderer
 
 import (
 	"fmt"
-	"runtime"
+	"sync" // Import the sync package
 
 	gl "github.com/go-gl/gl/v4.1-core/gl"
 	audio "github.com/richinsley/goshadertoy/audio"
-	glfwcontext "github.com/richinsley/goshadertoy/glfwcontext"
-	headless "github.com/richinsley/goshadertoy/headless"
 	inputs "github.com/richinsley/goshadertoy/inputs"
+	graphics "github.comcom/richinsley/goshadertoy/graphics"
 )
+
+// Add a package-level variable to ensure gl.Init() is called only once.
+var glInitOnce sync.Once
 
 // Renderer struct for Linux, includes headless context.
 type Renderer struct {
-	context           *glfwcontext.Context
-	headlessContext   *headless.Headless
+	context           graphics.Context
 	quadVAO           uint32
 	bufferPasses      []*RenderPass
 	namedPasses       map[string]*RenderPass
@@ -31,29 +32,32 @@ type Renderer struct {
 	audioDevice       audio.AudioDevice
 }
 
-func NewRenderer(width, height int, visible bool, bitDepth int, numPBOs int, ad audio.AudioDevice) (*Renderer, error) {
+func NewRenderer(width, height int, recordMode bool, bitDepth int, numPBOs int, ad audio.AudioDevice, ctx graphics.Context) (*Renderer, error) {
 	r := &Renderer{
 		width:       width,
 		height:      height,
-		recordMode:  !visible,
+		recordMode:  recordMode,
 		audioDevice: ad,
+		context:     ctx,
 	}
-	var err error
 
 	r.namedPasses = make(map[string]*RenderPass)
 	r.bufferPasses = make([]*RenderPass, 0)
 	r.buffers = make(map[string]*inputs.Buffer)
 
-	if r.recordMode && runtime.GOOS == "linux" {
-		r.headlessContext, err = headless.NewHeadless(width, height)
-	} else {
-		r.context, err = glfwcontext.New(width, height, visible)
+	// Make the context current BEFORE initializing OpenGL.
+	r.context.MakeCurrent()
+
+	// Initialize the OpenGL function pointers once.
+	var initErr error
+	glInitOnce.Do(func() {
+		initErr = gl.Init()
+	})
+	if initErr != nil {
+		return nil, fmt.Errorf("failed to initialize OpenGL: %w", initErr)
 	}
 
-	if err != nil {
-		return nil, fmt.Errorf("failed to initialize graphics context: %w", err)
-	}
-
+	var err error
 	r.offscreenRenderer, err = NewOffscreenRenderer(r.width, r.height, bitDepth, numPBOs)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create offscreen renderer: %w", err)
@@ -84,10 +88,4 @@ func (r *Renderer) Shutdown() {
 		r.offscreenRenderer.Destroy()
 	}
 	gl.DeleteVertexArrays(1, &r.quadVAO)
-	if r.context != nil {
-		r.context.Shutdown()
-	}
-	if r.headlessContext != nil {
-		r.headlessContext.Shutdown()
-	}
 }

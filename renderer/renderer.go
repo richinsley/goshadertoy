@@ -10,6 +10,7 @@ import (
 	gl "github.com/go-gl/gl/v4.1-core/gl"
 	api "github.com/richinsley/goshadertoy/api"
 	audio "github.com/richinsley/goshadertoy/audio"
+	"github.com/richinsley/goshadertoy/glfwcontext"
 	inputs "github.com/richinsley/goshadertoy/inputs"
 	options "github.com/richinsley/goshadertoy/options"
 	shader "github.com/richinsley/goshadertoy/shader"
@@ -293,8 +294,6 @@ func (r *Renderer) Run() {
 	}
 	startTime := r.context.Time()
 	var frameCount int32 = 0
-	var lastMouseClickX, lastMouseClickY float64
-	var mouseWasDown bool
 	var lastFrameTime = r.context.Time()
 	micChannel := findMicChannel(r) // Helper to find the mic channel instance
 
@@ -303,36 +302,9 @@ func (r *Renderer) Run() {
 		timeDelta := float32(currentTime - lastFrameTime)
 		lastFrameTime = currentTime
 
-		var mouseData [4]float32
-		win := r.context.Window()
-		if win != nil {
-			fbWidth, fbHeight := r.context.GetFramebufferSize()
-			winWidth, winHeight := win.GetSize()
-			var scaleX, scaleY float64 = 1.0, 1.0
-			if winWidth > 0 && winHeight > 0 {
-				scaleX = float64(fbWidth) / float64(winWidth)
-				scaleY = float64(fbHeight) / float64(winHeight)
-			}
-			cursorX, cursorY := win.GetCursorPos()
-			pixelX := cursorX * scaleX
-			pixelY := cursorY * scaleY
-			mouseX := float32(pixelX)
-			mouseY := float32(fbHeight) - float32(pixelY)
-			const mouseLeft = 0
-			isMouseDown := win.GetMouseButton(mouseLeft) == 1
-			if isMouseDown && !mouseWasDown {
-				lastMouseClickX = pixelX
-				lastMouseClickY = pixelY
-			}
-			mouseWasDown = isMouseDown
-			clickX := float32(lastMouseClickX)
-			clickY := float32(fbHeight) - float32(lastMouseClickY)
-			if !isMouseDown {
-				clickX = -clickX
-				clickY = -clickY
-			}
-			mouseData = [4]float32{mouseX, mouseY, clickX, clickY}
-		}
+		// This block is now much simpler and cleaner!
+		// It relies on the context to provide the mouse data.
+		mouseData := r.context.GetMouseInput()
 
 		var sampleRate float32 = 44100
 		var channelResolutions [4][3]float32
@@ -357,15 +329,13 @@ func (r *Renderer) Run() {
 			TimeDelta:         timeDelta,
 			FrameRate:         frameRate,
 			Frame:             frameCount,
-			Mouse:             mouseData,
+			Mouse:             mouseData, // Use the data from GetMouseInput
 			ChannelTime:       [4]float32{float32(currentTime), float32(currentTime), float32(currentTime), float32(currentTime)},
 			SampleRate:        sampleRate,
 			ChannelResolution: channelResolutions,
 		}
 
 		if micChannel != nil {
-			// Get the latest audio samples for FFT.
-			// Read enough samples to fill the FFT input size.
 			const fftInputSize = 2048 // From inputs/mic.go
 			samples := r.audioDevice.GetBuffer().WindowPeek()
 			monoSamples := audio.DownmixStereoToMono(samples)
@@ -374,15 +344,19 @@ func (r *Renderer) Run() {
 
 		r.RenderFrame(currentTime, frameCount, mouseData, uniforms)
 
-		fbWidth, fbHeight := r.context.GetFramebufferSize()
-		gl.Viewport(0, 0, int32(fbWidth), int32(fbHeight))
-		gl.Clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT)
-		gl.UseProgram(r.blitProgram)
-		gl.ActiveTexture(gl.TEXTURE0)
-		gl.BindTexture(gl.TEXTURE_2D, r.offscreenRenderer.textureID)
-		gl.BindVertexArray(r.quadVAO)
-		gl.DrawArrays(gl.TRIANGLES, 0, 6)
-		gl.BindTexture(gl.TEXTURE_2D, 0)
+		// This part is for drawing to the screen, which only happens in a windowed context.
+		// A type assertion is appropriate here.
+		if _, ok := r.context.(*glfwcontext.Context); ok {
+			fbWidth, fbHeight := r.context.GetFramebufferSize()
+			gl.Viewport(0, 0, int32(fbWidth), int32(fbHeight))
+			gl.Clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT)
+			gl.UseProgram(r.blitProgram)
+			gl.ActiveTexture(gl.TEXTURE0)
+			gl.BindTexture(gl.TEXTURE_2D, r.offscreenRenderer.textureID)
+			gl.BindVertexArray(r.quadVAO)
+			gl.DrawArrays(gl.TRIANGLES, 0, 6)
+			gl.BindTexture(gl.TEXTURE_2D, 0)
+		}
 
 		r.context.EndFrame()
 		frameCount++

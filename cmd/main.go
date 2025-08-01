@@ -11,38 +11,74 @@ import (
 	api "github.com/richinsley/goshadertoy/api"
 	"github.com/richinsley/goshadertoy/arcana"
 	"github.com/richinsley/goshadertoy/audio"
+	"github.com/richinsley/goshadertoy/glfwcontext"
 	options "github.com/richinsley/goshadertoy/options"
 	renderer "github.com/richinsley/goshadertoy/renderer"
 )
 
 func runShadertoy(shaderArgs *api.ShaderArgs, options *options.ShaderOptions) {
-	arcana.Init() // Initialize Arcana for FFmpeg support
+	arcana.Init()
 
-	// Create the single audio device here.
+	// Initialize GLFW on the main thread
+	if err := glfwcontext.InitGraphics(); err != nil {
+		log.Fatalf("Failed to initialize graphics: %v", err)
+	}
+	defer glfwcontext.TerminateGraphics()
+
+	// --- Create Contexts ---
+	// The main visual context (visible window)
+	visualContext, err := glfwcontext.New(*options.Width, *options.Height, true, nil)
+	if err != nil {
+		log.Fatalf("Failed to create visual context: %v", err)
+	}
+
+	// The sound renderer context (hidden window, shares resources with visual context)
+	// NOTE: Sharing contexts is important for performance and resource management.
+	// soundContext, err := glfwcontext.New(1, 1, false, visualContext.Window())
+	// if err != nil {
+	// 	log.Fatalf("Failed to create sound context: %v", err)
+	// }
+
+	// --- Create Audio Device ---
 	audioDevice, err := audio.NewFFmpegAudioDevice(options)
 	if err != nil {
 		log.Fatalf("Failed to create audio device: %v", err)
 	}
 	defer audioDevice.Stop()
 
-	// Initialize renderer
+	// --- Create Renderers ---
 	mode := *options.Mode
 	isRecord := mode == "record" || mode == "stream"
 
-	r, err := renderer.NewRenderer(*options.Width, *options.Height, !isRecord, *options.BitDepth, *options.NumPBOs, audioDevice)
+	// Create the main visual renderer
+	r, err := renderer.NewRenderer(*options.Width, *options.Height, !isRecord, *options.BitDepth, *options.NumPBOs, audioDevice, visualContext)
 	if err != nil {
 		log.Fatalf("Failed to create renderer: %v", err)
 	}
 	defer r.Shutdown()
 
-	// Initialize the scene with shaders and channels
 	err = r.InitScene(shaderArgs, options)
 	if err != nil {
 		log.Fatalf("Failed to initialize scene: %v", err)
 	}
 
-	// Start the audio device now that the scene (and mic channel) is initialized.
-	// This only starts the decoding process into the shared buffer.
+	/*
+		// --- Sound Shader Setup ---
+		soundShaderCode := "" // TODO: Load this from shaderArgs if a sound pass exists
+		if soundShaderCode != "" {
+			soundRenderer, err := renderer.NewSoundShaderRenderer(soundContext, audioDevice.GetBuffer(), soundShaderCode)
+			if err != nil {
+				log.Fatalf("Failed to create sound renderer: %v", err)
+			}
+
+			// Run the sound renderer in its own goroutine
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			go soundRenderer.Run(ctx)
+		}
+	*/
+
+	// --- Start Main Loop ---
 	if err := audioDevice.Start(); err != nil {
 		log.Fatalf("Failed to start audio device: %v", err)
 	}

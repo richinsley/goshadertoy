@@ -5,6 +5,7 @@ package headless
 import (
 	"fmt"
 	"log"
+	"time"
 	"unsafe"
 
 	gl "github.com/go-gl/gl/v4.1-core/gl"
@@ -42,9 +43,12 @@ static EGLBoolean query_devices(EGLint max_devices, EGLDeviceEXT *devices, EGLin
 import "C"
 
 type Headless struct {
-	display C.EGLDisplay
-	context C.EGLContext
-	surface C.EGLSurface
+	display   C.EGLDisplay
+	context   C.EGLContext
+	surface   C.EGLSurface
+	width     int
+	height    int
+	startTime time.Time
 }
 
 // getEGLDisplay tries the robust device enumeration method first,
@@ -85,7 +89,11 @@ func getEGLDisplay() (C.EGLDisplay, error) {
 }
 
 func NewHeadless(width, height int) (*Headless, error) {
-	h := &Headless{}
+	h := &Headless{
+		width:     width,
+		height:    height,
+		startTime: time.Now(),
+	}
 
 	var err error
 	h.display, err = getEGLDisplay()
@@ -144,6 +152,33 @@ func NewHeadless(width, height int) (*Headless, error) {
 	}
 
 	return h, nil
+}
+
+func (h *Headless) MakeCurrent() {
+	C.eglMakeCurrent(h.display, h.surface, h.surface, h.context)
+}
+
+// ShouldClose for headless context is always false; it's controlled externally.
+func (h *Headless) ShouldClose() bool {
+	return false
+}
+
+func (h *Headless) EndFrame() {
+	C.eglSwapBuffers(h.display, h.surface)
+}
+
+func (h *Headless) GetFramebufferSize() (int, int) {
+	return h.width, h.height
+}
+
+// Time provides an internal timer since the headless context doesn't rely on GLFW's timer.
+func (h *Headless) Time() float64 {
+	return time.Since(h.startTime).Seconds()
+}
+
+// GetMouseInput for a headless context always returns zero values.
+func (h *Headless) GetMouseInput() [4]float32 {
+	return [4]float32{0, 0, 0, 0}
 }
 
 func (h *Headless) Shutdown() {

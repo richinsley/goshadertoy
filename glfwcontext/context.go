@@ -4,23 +4,19 @@ import (
 	"log"
 	"runtime"
 
-	gl "github.com/go-gl/gl/v4.1-core/gl"
 	glfw "github.com/go-gl/glfw/v3.3/glfw"
 )
 
-// Context is a dedicated package for managing the GLFW window and context.
+// Context now tracks mouse state for the GetMouseInput method.
 type Context struct {
-	window *glfw.Window
+	window          *glfw.Window
+	lastMouseClickX float64
+	lastMouseClickY float64
+	mouseWasDown    bool
 }
 
-// New creates and initializes a new GLFW context and window.
-func New(width, height int, visible bool) (*Context, error) {
-	runtime.LockOSThread()
-
-	if err := glfw.Init(); err != nil {
-		return nil, err
-	}
-
+// New creates and initializes a new GLFW window and returns a Context object.
+func New(width, height int, visible bool, share *glfw.Window) (*Context, error) {
 	glfw.WindowHint(glfw.ContextVersionMajor, 4)
 	glfw.WindowHint(glfw.ContextVersionMinor, 1)
 	glfw.WindowHint(glfw.OpenGLProfile, glfw.OpenGLCoreProfile)
@@ -32,49 +28,101 @@ func New(width, height int, visible bool) (*Context, error) {
 		glfw.WindowHint(glfw.Visible, glfw.False)
 	}
 
-	win, err := glfw.CreateWindow(width, height, "goshadertoy", nil, nil)
+	win, err := glfw.CreateWindow(width, height, "goshadertoy", nil, share)
 	if err != nil {
-		glfw.Terminate()
 		return nil, err
 	}
-
-	win.MakeContextCurrent()
-
-	if err := gl.Init(); err != nil {
-		return nil, err
-	}
-	log.Printf("GLFW Context: OpenGL Version %s", gl.GoStr(gl.GetString(gl.VERSION)))
 
 	return &Context{window: win}, nil
 }
 
-// Shutdown safely terminates the GLFW context.
-func (c *Context) Shutdown() {
-	glfw.Terminate()
+// GetMouseInput implements the method for the graphics.Context interface.
+// It retrieves and processes the current mouse state.
+func (c *Context) GetMouseInput() [4]float32 {
+	var mouseData [4]float32
+	if c.window == nil {
+		return mouseData
+	}
+
+	fbWidth, fbHeight := c.GetFramebufferSize()
+	winWidth, winHeight := c.window.GetSize()
+	var scaleX, scaleY float64 = 1.0, 1.0
+	if winWidth > 0 && winHeight > 0 {
+		scaleX = float64(fbWidth) / float64(winWidth)
+		scaleY = float64(fbHeight) / float64(winHeight)
+	}
+
+	cursorX, cursorY := c.window.GetCursorPos()
+	pixelX := cursorX * scaleX
+	pixelY := cursorY * scaleY
+
+	mouseX := float32(pixelX)
+	mouseY := float32(fbHeight) - float32(pixelY)
+
+	const mouseLeft = 0
+	isMouseDown := c.window.GetMouseButton(mouseLeft) == glfw.Press
+	if isMouseDown && !c.mouseWasDown {
+		c.lastMouseClickX = pixelX
+		c.lastMouseClickY = pixelY
+	}
+	c.mouseWasDown = isMouseDown
+
+	clickX := float32(c.lastMouseClickX)
+	clickY := float32(fbHeight) - float32(c.lastMouseClickY)
+
+	if !isMouseDown {
+		clickX = -clickX
+		clickY = -clickY
+	}
+
+	mouseData = [4]float32{mouseX, mouseY, clickX, clickY}
+	return mouseData
 }
 
-// ShouldClose returns true if the user has requested to close the window.
+// MakeCurrent makes the context current for the calling goroutine.
+func (c *Context) MakeCurrent() {
+	c.window.MakeContextCurrent()
+}
+
+// Shutdown now only destroys the window.
+func (c *Context) Shutdown() {
+	c.window.Destroy()
+}
+
 func (c *Context) ShouldClose() bool {
 	return c.window.ShouldClose()
 }
 
-// EndFrame swaps the graphics buffers and polls for user events.
 func (c *Context) EndFrame() {
 	c.window.SwapBuffers()
 	glfw.PollEvents()
 }
 
-// GetFramebufferSize returns the current width and height of the window's drawable area.
 func (c *Context) GetFramebufferSize() (int, int) {
 	return c.window.GetFramebufferSize()
 }
 
-// Window returns the underlying *glfw.Window object for direct access if needed (e.g., input).
+func (c *Context) Time() float64 {
+	return glfw.GetTime()
+}
+
+// Window returns the underlying *glfw.Window. This is kept for the sound-context sharing case.
 func (c *Context) Window() *glfw.Window {
 	return c.window
 }
 
-// Time returns the number of seconds since the context was initialized.
-func (c *Context) Time() float64 {
-	return glfw.GetTime()
+// InitGraphics initializes the main graphics subsystem (GLFW). Must be called from the main thread.
+func InitGraphics() error {
+	runtime.LockOSThread()
+	if err := glfw.Init(); err != nil {
+		return err
+	}
+	log.Printf("GLFW Initialized")
+	return nil
+}
+
+// TerminateGraphics shuts down the graphics subsystem. Must be called from the main thread.
+func TerminateGraphics() {
+	glfw.Terminate()
+	log.Printf("GLFW Terminated")
 }
