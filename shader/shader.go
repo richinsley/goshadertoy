@@ -2,6 +2,7 @@ package shader
 
 import (
 	"fmt"
+	"strings"
 
 	inputs "github.com/richinsley/goshadertoy/inputs"
 )
@@ -178,6 +179,63 @@ out vec4 fragColor;
 uniform sampler2D u_texture;
 void main() { fragColor = texture(u_texture, frag_uv); }
 `
+
+// GenerateSoundShaderSource creates the full WebGL source for a sound shader.
+// It does not depend on the inputs package, breaking the import cycle.
+// GenerateSoundShaderSource creates the full WebGL source for a sound shader.
+func GenerateSoundShaderSource(commonCode, soundShader string, channels []inputs.IChannel) string {
+	// The preamble includes all standard uniforms a sound shader might need.
+	preamble := `#version 300 es
+precision highp float;
+precision highp int;
+precision mediump sampler3D;
+
+#define HW_PERFORMANCE 1
+
+uniform float iTimeOffset;
+uniform int   iSampleOffset;
+uniform vec4  iDate;
+uniform float iSampleRate;
+uniform vec3  iChannelResolution[4];
+uniform float iChannelTime[4];
+`
+	// Declare iChannelN samplers based on the provided channel types.
+	for i := 0; i < 4; i++ {
+		sampler := "sampler2D"
+		if channels != nil && i < len(channels) && channels[i] != nil {
+			sampler = channels[i].GetSamplerType()
+		}
+		preamble += fmt.Sprintf("uniform %s iChannel%d;\n", sampler, i)
+	}
+
+	// The main function that Shadertoy uses for sound shaders.
+	// It calls the user-provided mainSound function.
+	mainWrapper := `
+out vec4 outColor;
+void main()
+{
+    float t = iTimeOffset + ((gl_FragCoord.x-0.5) + (gl_FragCoord.y-0.5)*512.0)/iSampleRate;
+    int   s = iSampleOffset + int(gl_FragCoord.y-0.5)*512 + int(gl_FragCoord.x-0.5);
+
+    // Call the user's mainSound function, which might be mainSound(t) or mainSound(s, t)
+    // We will assume the more complex one is available if defined.
+    vec2 y = mainSound( s, t );
+
+    vec2 v  = floor((0.5+0.5*y)*65536.0);
+    vec2 vl =   mod(v,256.0)/255.0;
+    vec2 vh = floor(v/256.0)/255.0;
+    outColor = vec4(vl.x,vh.x,vl.y,vh.y);
+}
+`
+	// Combine all parts. The user's soundShader string is expected to contain the mainSound function.
+	// We also need to add a dummy mainSound(s,t) if only mainSound(t) is provided.
+	soundShaderCode := soundShader
+	if !strings.Contains(soundShader, "mainSound( int, float )") {
+		soundShaderCode += "\nvec2 mainSound( int s, float t ) { return mainSound(t); }\n"
+	}
+
+	return preamble + commonCode + "\n" + soundShaderCode + "\n" + mainWrapper
+}
 
 // ────────────────────────────────── Public API ─────────────────────────────────
 
