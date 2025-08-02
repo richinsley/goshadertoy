@@ -11,7 +11,6 @@ type AudioDevice interface {
 	// GetBuffer returns the shared audio buffer.
 	GetBuffer() *SharedAudioBuffer
 	// DecodeUntil decodes the audio source until the given sample count is reached.
-	// This is a no-op for live devices and used for file-based sources in record mode.
 	DecodeUntil(targetSample int64) error
 }
 
@@ -27,6 +26,15 @@ func NewNullDevice(sampleRate int) *NullDevice {
 		rate:   sampleRate,
 		stopCh: make(chan struct{}),
 		buffer: NewSharedAudioBuffer(sampleRate * 5), // 5 seconds of buffer
+	}
+}
+
+// NewNullDeviceWithBuffer creates a NullDevice that uses a pre-existing buffer.
+func NewNullDeviceWithBuffer(sampleRate int, buffer *SharedAudioBuffer) *NullDevice {
+	return &NullDevice{
+		rate:   sampleRate,
+		stopCh: make(chan struct{}),
+		buffer: buffer,
 	}
 }
 

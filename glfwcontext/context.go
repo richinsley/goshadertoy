@@ -36,6 +36,16 @@ func New(width, height int, visible bool, share *glfw.Window) (*Context, error) 
 	return &Context{window: win}, nil
 }
 
+// DetachCurrent makes no context current on the calling thread.
+func (c *Context) DetachCurrent() {
+	glfw.DetachCurrentContext()
+}
+
+func (c *Context) IsGLES() bool {
+	// GLFW does not provide a direct way to check if the context is GLES.
+	return false
+}
+
 // GetMouseInput implements the method for the graphics.Context interface.
 // It retrieves and processes the current mouse state.
 func (c *Context) GetMouseInput() [4]float32 {

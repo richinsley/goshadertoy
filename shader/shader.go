@@ -2,7 +2,6 @@ package shader
 
 import (
 	"fmt"
-	"strings"
 
 	inputs "github.com/richinsley/goshadertoy/inputs"
 )
@@ -228,9 +227,9 @@ void main()
 	// Combine all parts. The user's soundShader string is expected to contain the mainSound function.
 	// We also need to add a dummy mainSound(s,t) if only mainSound(t) is provided.
 	soundShaderCode := soundShader
-	if !strings.Contains(soundShader, "mainSound( int, float )") {
-		soundShaderCode += "\nvec2 mainSound( int s, float t ) { return mainSound(t); }\n"
-	}
+	// if !strings.Contains(soundShader, "mainSound( int, float )") {
+	// 	soundShaderCode += "\nvec2 mainSound( int s, float t ) { return mainSound(t); }\n"
+	// }
 
 	return preamble + commonCode + "\n" + soundShaderCode + "\n" + mainWrapper
 }

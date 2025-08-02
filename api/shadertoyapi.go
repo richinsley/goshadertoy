@@ -705,17 +705,22 @@ func ShaderArgsFromJSON(shaderData *ShadertoyResponse, useCache bool) (*ShaderAr
 	for _, rPass := range shaderData.Shader.RenderPass {
 		switch rPass.Type {
 		case "image":
-			/*
-				args.ShaderCode = rPass.Code
-				if len(rPass.Inputs) > 0 {
-					args.Inputs, inputsComplete, err = downloadMediaChannels(rPass.Inputs, rPass.Type, useCache)
-					if err != nil {
-						return nil, fmt.Errorf("error processing image pass inputs: %w", err)
-					}
-					args.Complete = args.Complete && inputsComplete
-				}
-			*/
 			bufferIdx := "image" // Use a special index for the image pass
+
+			bufferInputs, inputsComplete, err = downloadMediaChannels(rPass.Inputs, rPass.Type, useCache)
+			if err != nil {
+				return nil, fmt.Errorf("error processing buffer %s inputs: %w", bufferIdx, err)
+			}
+			args.Complete = args.Complete && inputsComplete
+
+			bufferPass := &BufferRenderPass{
+				Code:      rPass.Code,
+				Inputs:    bufferInputs,
+				BufferIdx: bufferIdx,
+			}
+			args.Buffers[bufferIdx] = bufferPass
+		case "sound":
+			bufferIdx := "sound" // Use a special index for the sound pass
 
 			bufferInputs, inputsComplete, err = downloadMediaChannels(rPass.Inputs, rPass.Type, useCache)
 			if err != nil {

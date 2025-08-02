@@ -176,6 +176,14 @@ func (h *Headless) Time() float64 {
 	return time.Since(h.startTime).Seconds()
 }
 
+func (c *Headless) IsGLES() bool {
+	return true // Headless context is always GLES
+}
+
+func (h *Headless) DetachCurrent() {
+	C.eglMakeCurrent(h.display, C.EGLSurface(C.EGL_NO_SURFACE), C.EGLSurface(C.EGL_NO_SURFACE), C.EGLContext(C.EGL_NO_CONTEXT))
+}
+
 // GetMouseInput for a headless context always returns zero values.
 func (h *Headless) GetMouseInput() [4]float32 {
 	return [4]float32{0, 0, 0, 0}

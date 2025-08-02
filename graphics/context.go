@@ -3,6 +3,7 @@ package graphics
 // Context defines the interface for an OpenGL context.
 type Context interface {
 	MakeCurrent()
+	DetachCurrent()
 	Shutdown()
 	ShouldClose() bool
 	EndFrame()
@@ -10,4 +11,5 @@ type Context interface {
 	Time() float64
 	// GetMouseInput returns the current mouse state: x, y, clickX, clickY
 	GetMouseInput() [4]float32
+	IsGLES() bool
 }

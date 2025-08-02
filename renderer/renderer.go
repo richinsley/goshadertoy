@@ -1,24 +1,22 @@
 package renderer
 
 import (
-	"context"
 	"fmt"
 	"log"
+	"runtime"
 	"strings"
 	"time"
-	"runtime"
 
 	gl "github.com/go-gl/gl/v4.1-core/gl"
 	api "github.com/richinsley/goshadertoy/api"
 	audio "github.com/richinsley/goshadertoy/audio"
-	"github.com/richinsley/goshadertoy/glfwcontext"
+	glfwcontext "github.com/richinsley/goshadertoy/glfwcontext"
 	inputs "github.com/richinsley/goshadertoy/inputs"
 	options "github.com/richinsley/goshadertoy/options"
 	shader "github.com/richinsley/goshadertoy/shader"
+	xlate "github.com/richinsley/goshadertoy/translator"
 	gst "github.com/richinsley/goshadertranslator"
 )
-
-var translator *gst.ShaderTranslator
 
 type RenderPass struct {
 	shaderProgram         uint32
@@ -71,6 +69,7 @@ func (r *Renderer) GetRenderPass(name string, shaderArgs *api.ShaderArgs, option
 		outputFormat = gst.OutputFormatESSL
 	}
 
+	translator := xlate.GetTranslator()
 	fsShader, err := translator.TranslateShader(fullFragmentSource, "fragment", gst.ShaderSpecWebGL2, outputFormat)
 	if err != nil {
 		return nil, fmt.Errorf("fragment shader translation failed: %w", err)
@@ -126,13 +125,6 @@ func (r *Renderer) GetRenderPass(name string, shaderArgs *api.ShaderArgs, option
 
 func (r *Renderer) InitScene(shaderArgs *api.ShaderArgs, options *options.ShaderOptions) error {
 	var err error
-	if translator == nil {
-		ctx := context.Background()
-		translator, err = gst.NewShaderTranslator(ctx)
-		if err != nil {
-			return err
-		}
-	}
 	var vbo uint32
 	gl.GenVertexArrays(1, &r.quadVAO)
 	gl.GenBuffers(1, &vbo)
