@@ -17,7 +17,7 @@ import (
 
 const (
 	soundTextureWidth  = 512
-	soundTextureHeight = 2 // Shadertoy generates 512 stereo samples per row. 2 rows = 1024 samples.
+	soundTextureHeight = 512
 	soundSampleRate    = 44100
 )
 
@@ -32,6 +32,7 @@ type SoundShaderRenderer struct {
 	shaderArgs      *api.ShaderArgs
 	options         *options.ShaderOptions
 	uniformMap      map[string]gst.ShaderVariable
+	channels        []inputs.IChannel
 
 	// uniform locations to match the official spec
 	timeOffsetLoc        int32
@@ -40,6 +41,7 @@ type SoundShaderRenderer struct {
 	dateLoc              int32
 	channelTimeLoc       int32
 	channelResolutionLoc int32
+	iChannelLoc          [4]int32
 }
 
 func (ssr *SoundShaderRenderer) GetUniformLocation(name string) int32 {
@@ -54,7 +56,7 @@ func (ssr *SoundShaderRenderer) GetUniformLocation(name string) int32 {
 func NewSoundShaderRenderer(ctx graphics.Context, preRenderedChan chan<- []float32, shaderArgs *api.ShaderArgs, options *options.ShaderOptions) *SoundShaderRenderer {
 	return &SoundShaderRenderer{
 		context:         ctx,
-		preRenderedChan: preRenderedChan, // Store the channel
+		preRenderedChan: preRenderedChan,
 		shaderArgs:      shaderArgs,
 		options:         options,
 	}
@@ -114,12 +116,13 @@ func (ssr *SoundShaderRenderer) InitGL() error {
 		commoncode = commonPass.Code
 	}
 
-	channels, err := inputs.GetChannels(passArgs.Inputs, 0, 0, 0, nil, ssr.options, nil)
+	var err error
+	ssr.channels, err = inputs.GetChannels(passArgs.Inputs, soundTextureWidth, soundTextureHeight, ssr.quadVAO, nil, ssr.options, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create channels for sound shader: %w", err)
 	}
 
-	fullFragmentSource := shader.GenerateSoundShaderSource(commoncode, passArgs.Code, channels)
+	fullFragmentSource := shader.GenerateSoundShaderSource(commoncode, passArgs.Code, ssr.channels)
 
 	outputFormat := gst.OutputFormatGLSL330
 	if ssr.context.IsGLES() {
@@ -155,6 +158,12 @@ func (ssr *SoundShaderRenderer) InitGL() error {
 	ssr.channelTimeLoc = ssr.GetUniformLocation("iChannelTime")
 	ssr.channelResolutionLoc = ssr.GetUniformLocation("iChannelResolution")
 
+	// Get iChannelN sampler locations
+	for i := 0; i < 4; i++ {
+		samplerName := fmt.Sprintf("iChannel%d", i)
+		ssr.iChannelLoc[i] = ssr.GetUniformLocation(samplerName)
+	}
+
 	log.Printf("Sound Shader Uniforms: iTimeOffset=%d, iSampleOffset=%d, iSampleRate=%d, iDate=%d, iChannelTime=%d, iChannelResolution=%d",
 		ssr.timeOffsetLoc, ssr.sampleOffsetLoc, ssr.sampleRateLoc, ssr.dateLoc, ssr.channelTimeLoc, ssr.channelResolutionLoc)
 
@@ -168,69 +177,59 @@ func (ssr *SoundShaderRenderer) InitGL() error {
 }
 
 // Run starts the rendering loop for the sound shader.
-// Run is now a high-speed loop that fills a large buffer and sends it.
 func (ssr *SoundShaderRenderer) Run(ctx context.Context) {
 	ssr.context.MakeCurrent()
 	defer ssr.Shutdown()
 
-	var timeOffset float32
-	var sampleOffset int32
-	samplesPerFrame := int32(soundTextureWidth * soundTextureHeight)
-	timeStep := float32(samplesPerFrame) / float32(soundSampleRate)
-
-	// This buffer will accumulate ~2 seconds of audio before sending.
-	const largeBufferSize = soundSampleRate * 4
-	largeBuffer := make([]float32, 0, largeBufferSize)
+	var timeOffset float32 = 0.0
+	var sampleOffset int32 = 0
+	samplesPerFullBuffer := int32(soundTextureWidth * soundTextureHeight)
+	timeStepPerFullBuffer := float32(samplesPerFullBuffer) / float32(soundSampleRate)
 
 	for {
-		// Render one small frame
-		gl.BindFramebuffer(gl.FRAMEBUFFER, ssr.fbo)
-		gl.UseProgram(ssr.program)
-
-		// --- Set All Required Uniforms ---
-		gl.Uniform1f(ssr.timeOffsetLoc, timeOffset)
-		gl.Uniform1i(ssr.sampleOffsetLoc, sampleOffset)
-		gl.Uniform1f(ssr.sampleRateLoc, soundSampleRate)
-
-		// ... set other uniforms ...
-		gl.Viewport(0, 0, soundTextureWidth, soundTextureHeight)
-		gl.BindVertexArray(ssr.quadVAO)
-		gl.DrawArrays(gl.TRIANGLES, 0, 6)
-
-		// Read back pixels
-		pixelData := make([]byte, samplesPerFrame*4)
-		gl.GetTexImage(gl.TEXTURE_2D, 0, gl.RGBA, gl.UNSIGNED_BYTE, gl.Ptr(pixelData))
-		gl.BindFramebuffer(gl.FRAMEBUFFER, 0)
-
-		// Decode and append to our large buffer
-		audioSamples := ssr.convertPixelsToAudio(pixelData)
-		largeBuffer = append(largeBuffer, audioSamples...)
-
-		// If the large buffer is full, send it to the feeder goroutine
-		if len(largeBuffer) >= largeBufferSize {
-			bufferToSend := make([]float32, len(largeBuffer))
-			copy(bufferToSend, largeBuffer)
-
-			select {
-			case ssr.preRenderedChan <- bufferToSend:
-				// Successfully sent, reset the buffer for the next chunk
-				largeBuffer = largeBuffer[:0]
-			case <-ctx.Done():
-				log.Println("Stopping sound shader renderer during send.")
-				return
-			}
-		}
-
-		// Increment offsets and check for context cancellation
-		timeOffset += timeStep
-		sampleOffset += samplesPerFrame
+		// Check for cancellation at the start of each large render cycle.
 		select {
 		case <-ctx.Done():
 			log.Println("Stopping sound shader renderer.")
 			return
 		default:
-			// Continue to next render iteration
+			// Continue to render the next large buffer.
 		}
+
+		// --- Render one large buffer ---
+		gl.BindFramebuffer(gl.FRAMEBUFFER, ssr.fbo)
+		gl.UseProgram(ssr.program)
+
+		// Set uniforms for the start of this buffer
+		gl.Uniform1f(ssr.timeOffsetLoc, timeOffset)
+		gl.Uniform1i(ssr.sampleOffsetLoc, sampleOffset)
+		gl.Uniform1f(ssr.sampleRateLoc, soundSampleRate)
+		// log.Println("Rendering sound shader frame at timeOffset:", timeOffset, "sampleOffset:", sampleOffset)
+
+		gl.Viewport(0, 0, soundTextureWidth, soundTextureHeight)
+		gl.BindVertexArray(ssr.quadVAO)
+		gl.DrawArrays(gl.TRIANGLES, 0, 6)
+
+		// --- Read the entire large buffer back ---
+		pixelData := make([]byte, samplesPerFullBuffer*4)
+		gl.ReadBuffer(gl.COLOR_ATTACHMENT0)
+		gl.ReadPixels(0, 0, soundTextureWidth, soundTextureHeight, gl.RGBA, gl.UNSIGNED_BYTE, gl.Ptr(pixelData))
+		gl.BindFramebuffer(gl.FRAMEBUFFER, 0)
+
+		// Convert and send the entire buffer in one go.
+		audioSamples := ssr.convertPixelsToAudio(pixelData)
+
+		select {
+		case ssr.preRenderedChan <- audioSamples:
+			// Successfully sent the buffer.
+		case <-ctx.Done():
+			log.Println("Stopping sound shader renderer during send.")
+			return
+		}
+
+		// Increment offsets for the next large buffer
+		timeOffset += timeStepPerFullBuffer
+		sampleOffset += samplesPerFullBuffer
 	}
 }
 
@@ -263,4 +262,49 @@ func (ssr *SoundShaderRenderer) convertPixelsToAudio(pixels []byte) []float32 {
 		samples[i*2+1] = rightVal*2.0 - 1.0                // Convert to [-1, 1]
 	}
 	return samples
+}
+
+func bindChannelsSound(ssr *SoundShaderRenderer, time float32) {
+	for i, ch := range ssr.channels {
+		if ch == nil {
+			continue
+		}
+		// Create a dummy Uniforms struct for channel updates
+		uniforms := &inputs.Uniforms{Time: time}
+		ch.Update(uniforms)
+
+		var texTarget uint32
+		switch ch.GetSamplerType() {
+		case "sampler3D":
+			texTarget = gl.TEXTURE_3D
+		case "samplerCube":
+			texTarget = gl.TEXTURE_CUBE_MAP
+		default:
+			texTarget = gl.TEXTURE_2D
+		}
+
+		if ssr.iChannelLoc[i] != -1 {
+			gl.ActiveTexture(gl.TEXTURE0 + uint32(i))
+			gl.BindTexture(texTarget, ch.GetTextureID())
+			gl.Uniform1i(ssr.iChannelLoc[i], int32(i))
+		}
+	}
+}
+
+func unbindChannelsSound(ssr *SoundShaderRenderer) {
+	for i, ch := range ssr.channels {
+		if ch != nil {
+			var texTarget uint32
+			switch ch.GetSamplerType() {
+			case "sampler3D":
+				texTarget = gl.TEXTURE_3D
+			case "samplerCube":
+				texTarget = gl.TEXTURE_CUBE_MAP
+			default:
+				texTarget = gl.TEXTURE_2D
+			}
+			gl.ActiveTexture(gl.TEXTURE0 + uint32(i))
+			gl.BindTexture(texTarget, 0)
+		}
+	}
 }

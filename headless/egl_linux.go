@@ -180,6 +180,11 @@ func (c *Headless) IsGLES() bool {
 	return true // Headless context is always GLES
 }
 
+// GetWindow returns nil for headless contexts.
+func (c *Headless) GetWindow() interface{} {
+	return nil // No window in headless mode
+}
+
 func (h *Headless) DetachCurrent() {
 	C.eglMakeCurrent(h.display, C.EGLSurface(C.EGL_NO_SURFACE), C.EGLSurface(C.EGL_NO_SURFACE), C.EGLContext(C.EGL_NO_CONTEXT))
 }

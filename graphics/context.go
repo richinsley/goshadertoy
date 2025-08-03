@@ -12,4 +12,5 @@ type Context interface {
 	// GetMouseInput returns the current mouse state: x, y, clickX, clickY
 	GetMouseInput() [4]float32
 	IsGLES() bool
+	GetWindow() interface{} // Returns the underlying window object, if any
 }

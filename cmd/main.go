@@ -86,8 +86,8 @@ func runShadertoy(shaderArgs *api.ShaderArgs, options *options.ShaderOptions) {
 			log.Fatalf("Failed to create visual GLFW context: %v", err)
 		}
 		if hasSoundShader {
-			// Create a second, hidden, independent context for the sound renderer.
-			soundContext, err = glfwcontext.New(1, 1, false, nil)
+			// Create a second, hidden, shared context for the sound renderer.
+			soundContext, err = glfwcontext.New(1, 1, false, visualContext.GetWindow())
 			if err != nil {
 				log.Fatalf("Failed to create hidden sound context: %v", err)
 			}
@@ -133,7 +133,7 @@ func runShadertoy(shaderArgs *api.ShaderArgs, options *options.ShaderOptions) {
 						if end > len(largeBuffer) {
 							end = len(largeBuffer)
 						}
-						audioBuffer.Write(largeBuffer[i:end], true)
+						audioBuffer.Write(largeBuffer[i:end], false)
 					}
 				case <-ctx.Done():
 					log.Println("Stopping audio feeder.")

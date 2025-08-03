@@ -16,7 +16,8 @@ type Context struct {
 }
 
 // New creates and initializes a new GLFW window and returns a Context object.
-func New(width, height int, visible bool, share *glfw.Window) (*Context, error) {
+func New(width, height int, visible bool, share interface{}) (*Context, error) {
+	sharecontext, _ := share.(*glfw.Window)
 	glfw.WindowHint(glfw.ContextVersionMajor, 4)
 	glfw.WindowHint(glfw.ContextVersionMinor, 1)
 	glfw.WindowHint(glfw.OpenGLProfile, glfw.OpenGLCoreProfile)
@@ -28,7 +29,7 @@ func New(width, height int, visible bool, share *glfw.Window) (*Context, error) 
 		glfw.WindowHint(glfw.Visible, glfw.False)
 	}
 
-	win, err := glfw.CreateWindow(width, height, "goshadertoy", nil, share)
+	win, err := glfw.CreateWindow(width, height, "goshadertoy", nil, sharecontext)
 	if err != nil {
 		return nil, err
 	}
@@ -44,6 +45,11 @@ func (c *Context) DetachCurrent() {
 func (c *Context) IsGLES() bool {
 	// GLFW does not provide a direct way to check if the context is GLES.
 	return false
+}
+
+// GetWindow returns the underlying *glfw.Window. This is kept for the sound-context sharing case.
+func (c *Context) GetWindow() interface{} {
+	return c.window
 }
 
 // GetMouseInput implements the method for the graphics.Context interface.
