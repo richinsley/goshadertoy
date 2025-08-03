@@ -208,7 +208,10 @@ func (ssr *SoundShaderRenderer) Run(ctx context.Context) {
 
 		gl.Viewport(0, 0, soundTextureWidth, soundTextureHeight)
 		gl.BindVertexArray(ssr.quadVAO)
+
+		bindChannelsSound(ssr, timeOffset)
 		gl.DrawArrays(gl.TRIANGLES, 0, 6)
+		unbindChannelsSound(ssr)
 
 		// --- Read the entire large buffer back ---
 		pixelData := make([]byte, samplesPerFullBuffer*4)
