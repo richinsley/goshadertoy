@@ -4,15 +4,15 @@
 package arcana
 
 /*
-#cgo CFLAGS: -I${SRCDIR}/../../release/include -I${SRCDIR}/../../release/include/arcana
-#cgo LDFLAGS: ${SRCDIR}/../../release/lib/libavformat_arcana.dylib
-#cgo LDFLAGS: ${SRCDIR}/../../release/lib/libavcodec_arcana.dylib
-#cgo LDFLAGS: ${SRCDIR}/../../release/lib/libavfilter_arcana.dylib
-#cgo LDFLAGS: ${SRCDIR}/../../release/lib/libavdevice_arcana.dylib
-#cgo LDFLAGS: ${SRCDIR}/../../release/lib/libswresample_arcana.dylib
-#cgo LDFLAGS: ${SRCDIR}/../../release/lib/libswscale_arcana.dylib
-#cgo LDFLAGS: ${SRCDIR}/../../release/lib/libpostproc_arcana.dylib
-#cgo LDFLAGS: ${SRCDIR}/../../release/lib/libavutil_arcana.dylib
+#cgo CFLAGS: -I${SRCDIR}/../release/include -I${SRCDIR}/../release/include/arcana
+#cgo LDFLAGS: ${SRCDIR}/../release/lib/libavformat_arcana.dylib
+#cgo LDFLAGS: ${SRCDIR}/../release/lib/libavcodec_arcana.dylib
+#cgo LDFLAGS: ${SRCDIR}/../release/lib/libavfilter_arcana.dylib
+#cgo LDFLAGS: ${SRCDIR}/../release/lib/libavdevice_arcana.dylib
+#cgo LDFLAGS: ${SRCDIR}/../release/lib/libswresample_arcana.dylib
+#cgo LDFLAGS: ${SRCDIR}/../release/lib/libswscale_arcana.dylib
+#cgo LDFLAGS: ${SRCDIR}/../release/lib/libpostproc_arcana.dylib
+#cgo LDFLAGS: ${SRCDIR}/../release/lib/libavutil_arcana.dylib
 
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
