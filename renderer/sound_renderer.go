@@ -111,18 +111,13 @@ func (ssr *SoundShaderRenderer) InitGL() error {
 	// Compile Shader
 	vertexShaderSource := shader.GenerateVertexShader(ssr.context.IsGLES())
 
-	commoncode := ""
-	if commonPass, ok := ssr.shaderArgs.Buffers["common"]; ok {
-		commoncode = commonPass.Code
-	}
-
 	var err error
 	ssr.channels, err = inputs.GetChannels(passArgs.Inputs, soundTextureWidth, soundTextureHeight, ssr.quadVAO, nil, ssr.options, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create channels for sound shader: %w", err)
 	}
 
-	fullFragmentSource := shader.GenerateSoundShaderSource(commoncode, passArgs.Code, ssr.channels)
+	fullFragmentSource := shader.GenerateSoundShaderSource(ssr.shaderArgs.CommonCode, passArgs.Code, ssr.channels)
 
 	outputFormat := gst.OutputFormatGLSL330
 	if ssr.context.IsGLES() {
