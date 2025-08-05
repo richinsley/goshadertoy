@@ -127,7 +127,7 @@ func (ssr *SoundShaderRenderer) InitGL() error {
 	translator := xlate.GetTranslator()
 	fsShader, err := translator.TranslateShader(fullFragmentSource, "fragment", gst.ShaderSpecWebGL2, outputFormat)
 	if err != nil {
-		fmt.Printf("Problematic Sound Shader Source:\n%s\n", fullFragmentSource)
+		log.Printf("Problematic Sound Shader Source:\n%s\n", fullFragmentSource)
 		return fmt.Errorf("sound shader translation failed: %w", err)
 	}
 

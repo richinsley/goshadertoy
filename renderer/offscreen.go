@@ -296,7 +296,7 @@ func (r *Renderer) runRecordMode(options *options.ShaderOptions) error {
 	sampleRate := r.audioDevice.SampleRate()
 	samplesPerFrame := sampleRate / *options.FPS
 	micChannel := findMicChannel(r)
-	hasAudio := r.audioDevice != nil && (*options.AudioInputFile != "" || *options.AudioInputDevice != "")
+	hasAudio := r.audioDevice != nil && (*options.AudioInputFile != "" || *options.AudioInputDevice != "" || options.HasSoundShader)
 
 	for i := 0; i < totalFrames; i++ {
 		currentTime := float64(i) * timeStep
@@ -309,13 +309,23 @@ func (r *Renderer) runRecordMode(options *options.ShaderOptions) error {
 
 		if hasAudio {
 			targetSample := int64((currentTime + timeStep) * float64(sampleRate))
-			if samplesPerFrame > int(r.audioDevice.GetBuffer().AvailableSamples()) {
-				r.audioDevice.DecodeUntil(targetSample)
+
+			// will block when more audio is needed,
+			// and return immediately if the buffer is already sufficient.
+			if err := r.audioDevice.DecodeUntil(targetSample); err != nil {
+				log.Printf("Error decoding audio: %v. Audio stream will stop.", err)
+				ffEncoder.CloseAudio() // Safely close the audio channel
+				hasAudio = false       // Prevent further audio processing attempts
 			}
 
-			stereoSamples := r.audioDevice.GetBuffer().Read(samplesPerFrame * 2)
-			if len(stereoSamples) > 0 {
-				ffEncoder.SendAudio(stereoSamples)
+			// Read a frame's worth of audio if available.
+			if r.audioDevice.GetBuffer().AvailableSamples() > 0 {
+				stereoSamples := r.audioDevice.GetBuffer().Read(samplesPerFrame * 2)
+				if len(stereoSamples) > 0 {
+					ffEncoder.SendAudio(stereoSamples)
+				}
+			} else {
+				log.Println("No audio samples available for this frame, skipping audio send.")
 			}
 
 			if micChannel != nil {
@@ -325,7 +335,7 @@ func (r *Renderer) runRecordMode(options *options.ShaderOptions) error {
 			}
 		}
 
-		fmt.Println("Rendering frame", i, "at time", currentTime)
+		// fmt.Println("Rendering frame", i, "at time", currentTime)
 		r.RenderFrame(currentTime, int32(i), [4]float32{0, 0, 0, 0}, uniforms)
 		r.RenderToYUV()
 

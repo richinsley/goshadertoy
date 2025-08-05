@@ -10,9 +10,9 @@ import (
 	"strings"
 
 	api "github.com/richinsley/goshadertoy/api"
-	"github.com/richinsley/goshadertoy/arcana"
-	"github.com/richinsley/goshadertoy/audio"
-	"github.com/richinsley/goshadertoy/glfwcontext"
+	arcana "github.com/richinsley/goshadertoy/arcana"
+	audio "github.com/richinsley/goshadertoy/audio"
+	glfwcontext "github.com/richinsley/goshadertoy/glfwcontext"
 	graphics "github.com/richinsley/goshadertoy/graphics"
 	headless "github.com/richinsley/goshadertoy/headless"
 	options "github.com/richinsley/goshadertoy/options"
@@ -26,31 +26,18 @@ func runShadertoy(shaderArgs *api.ShaderArgs, options *options.ShaderOptions) {
 	isRecord := mode == "record" || mode == "stream"
 
 	var audioDevice audio.AudioDevice
-	var audioBuffer *audio.SharedAudioBuffer
-	var player *audio.AudioPlayer
 	var err error
-	soundSampleRate := 444100 // Default sample rate for audio playback
+	soundSampleRate := 44100 // Default sample rate for audio playback
 	// This channel connects the sound renderer (producer) to the audio feeder (consumer).
-	// It handles back pressure automatically. A buffer of 4 means the GPU can render
-	// up to 4 seconds of audio ahead of playback.
 	preRenderedAudio := make(chan []float32, 4)
 
-	_, hasSoundShader := shaderArgs.Buffers["sound"]
-	if hasSoundShader {
+	_, options.HasSoundShader = shaderArgs.Buffers["sound"]
+	if options.HasSoundShader {
 		log.Println("Sound shader detected, using it as the primary audio source.")
-		// This is the final, small-chunk buffer that the player reads from.
-		audioBuffer = audio.NewSharedAudioBuffer(soundSampleRate * 10) // 10-second capacity
-		// The NullDevice acts as a simple container for the buffer.
-		audioDevice = audio.NewNullDeviceWithBuffer(soundSampleRate, audioBuffer)
-
-		// Create the audio player if an output device is specified.
-		if options.AudioOutputDevice != nil && *options.AudioOutputDevice != "" {
-			player, err = audio.NewAudioPlayer(options)
-			if err != nil {
-				log.Fatalf("Failed to create audio player: %v", err)
-			}
+		audioDevice, err = audio.NewShaderAudioDevice(options, preRenderedAudio, soundSampleRate)
+		if err != nil {
+			log.Fatalf("Failed to create shader audio device: %v", err)
 		}
-
 	} else {
 		// If there's no sound shader, use the FFmpeg device/file input as before.
 		audioDevice, err = audio.NewFFmpegAudioDevice(options)
@@ -68,7 +55,7 @@ func runShadertoy(shaderArgs *api.ShaderArgs, options *options.ShaderOptions) {
 		if err != nil {
 			log.Fatalf("Failed to create headless EGL context: %v", err)
 		}
-		if hasSoundShader {
+		if options.HasSoundShader {
 			soundContext, err = headless.NewHeadless(1, 1) // Sound context can be minimal
 			if err != nil {
 				log.Fatalf("Failed to create headless sound context: %v", err)
@@ -85,7 +72,7 @@ func runShadertoy(shaderArgs *api.ShaderArgs, options *options.ShaderOptions) {
 		if err != nil {
 			log.Fatalf("Failed to create visual GLFW context: %v", err)
 		}
-		if hasSoundShader {
+		if options.HasSoundShader {
 			// Create a second, hidden, shared context for the sound renderer.
 			soundContext, err = glfwcontext.New(1, 1, false, visualContext.GetWindow())
 			if err != nil {
@@ -94,7 +81,7 @@ func runShadertoy(shaderArgs *api.ShaderArgs, options *options.ShaderOptions) {
 		}
 	}
 
-	// --- RENDERER CREATION ---
+	// Create the renderer
 	r, err := renderer.NewRenderer(*options.Width, *options.Height, isRecord, *options.BitDepth, *options.NumPBOs, audioDevice, visualContext)
 	if err != nil {
 		log.Fatalf("Failed to create renderer: %v", err)
@@ -106,11 +93,11 @@ func runShadertoy(shaderArgs *api.ShaderArgs, options *options.ShaderOptions) {
 		log.Fatalf("Failed to initialize scene: %v", err)
 	}
 
-	// --- START CONCURRENT PROCESSES ---
+	// Start concurrent processes
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	if hasSoundShader {
+	if options.HasSoundShader {
 		// Start the PRODUCER goroutine (GPU rendering)
 		soundRenderer := renderer.NewSoundShaderRenderer(soundContext, preRenderedAudio, shaderArgs, options)
 		go func() {
@@ -120,43 +107,14 @@ func runShadertoy(shaderArgs *api.ShaderArgs, options *options.ShaderOptions) {
 			}
 			soundRenderer.Run(ctx)
 		}()
-
-		// Start the CONSUMER goroutine (audio feeder)
-		go func() {
-			const playbackChunkSize = 1024 * 2 // Feed player in ~23ms chunks (at 44.1kHz)
-			for {
-				select {
-				case largeBuffer := <-preRenderedAudio:
-					// Slice the large, pre-rendered buffer into smaller chunks for playback
-					for i := 0; i < len(largeBuffer); i += playbackChunkSize {
-						end := i + playbackChunkSize
-						if end > len(largeBuffer) {
-							end = len(largeBuffer)
-						}
-						audioBuffer.Write(largeBuffer[i:end], false)
-					}
-				case <-ctx.Done():
-					log.Println("Stopping audio feeder.")
-					return
-				}
-			}
-		}()
 	}
 
-	// Start the audio device's own internal loop (for FFmpeg sources)
+	// Start the audio device's own internal loop (for FFmpeg sources or shader audio)
 	if err := audioDevice.Start(); err != nil {
 		log.Fatalf("Failed to start audio device: %v", err)
 	}
 
-	// Start the audio player if it exists
-	if player != nil {
-		if err := player.Start(audioBuffer); err != nil {
-			log.Fatalf("Failed to start audio player: %v", err)
-		}
-		defer player.Stop()
-	}
-
-	// --- RUN MAIN LOOP ---
+	// Run the main loop
 	switch mode {
 	case "record", "stream":
 		log.Printf("Starting %s mode...", mode)
@@ -181,8 +139,6 @@ func main() {
 	options.APIKey = flag.String("apikey", "", "Shadertoy API key (from SHADERTOY_KEY env var if not set)")
 	options.ShaderID = flag.String("shader", "XlSSzV", "Shadertoy shader ID")
 	options.Help = flag.Bool("help", false, "Show help message")
-
-	// Mode flag - replaces the record flag
 	options.Mode = flag.String("mode", "Live", "Rendering mode: Live, Record, or Stream (case-insensitive)")
 	options.Duration = flag.Float64("duration", 10.0, "Duration to record in seconds")
 	options.FPS = flag.Int("fps", 60, "Frames per second for recording")

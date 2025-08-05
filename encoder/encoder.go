@@ -27,9 +27,10 @@ import (
 	"fmt"
 	"log"
 	"runtime"
+	"sync"
 	"unsafe"
 
-	"github.com/richinsley/goshadertoy/options"
+	options "github.com/richinsley/goshadertoy/options"
 )
 
 // Frame represents a single rendered video frame's data, ready for encoding.
@@ -55,6 +56,7 @@ type FFmpegEncoder struct {
 	videoFrames chan *Frame
 	audioFrames chan []float32
 	done        chan error
+	audioMutex  sync.Mutex
 }
 
 // findBestVideoEncoder attempts to find a suitable video encoder by checking a prioritized list.
@@ -114,19 +116,18 @@ func NewFFmpegEncoder(opts *options.ShaderOptions) (*FFmpegEncoder, error) {
 	e := &FFmpegEncoder{
 		opts:        opts,
 		videoFrames: make(chan *Frame, 5),
-		// audioFrames: make(chan []float32, 16),
 		done:        make(chan error, 1),
 	}
 
 	cFilename := C.CString(*opts.OutputFile)
 	defer C.free(unsafe.Pointer(cFilename))
 
-	// 1. Allocate format context
+	// Allocate format context
 	if C.avformat_alloc_output_context2(&e.formatCtx, nil, nil, cFilename) < 0 {
 		return nil, fmt.Errorf("could not allocate output context")
 	}
 
-	// 2. Find and add video stream
+	// Find and add video stream
 	videoCodec, videoCodecName := findBestVideoEncoder(*opts.Codec)
 	if videoCodec == nil {
 		return nil, fmt.Errorf("could not find a suitable video encoder for '%s'", *opts.Codec)
@@ -135,9 +136,9 @@ func NewFFmpegEncoder(opts *options.ShaderOptions) (*FFmpegEncoder, error) {
 		return nil, fmt.Errorf("failed to add video stream: %w", err)
 	}
 
-	// 3. Find and add audio stream (if applicable)
+	// Find and add audio stream (if applicable)
 	var audioCodec *C.AVCodec
-	hasAudio := *opts.AudioInputFile != "" || *opts.AudioInputDevice != ""
+	hasAudio := *opts.AudioInputFile != "" || *opts.AudioInputDevice != "" || opts.HasSoundShader
 	if hasAudio {
 		cAACName := C.CString("aac")
 		audioCodec = C.avcodec_find_encoder_by_name(cAACName)
@@ -150,17 +151,16 @@ func NewFFmpegEncoder(opts *options.ShaderOptions) (*FFmpegEncoder, error) {
 		}
 		e.audioFrames = make(chan []float32, 16)
 	} else {
-		// No audio stream needed, set to nil
 		e.audioStream = nil
 		e.audioCodecCtx = nil
 	}
 
-	// 4. Open codecs
+	// Open codecs
 	if err := e.openVideo(videoCodec, videoCodecName, opts); err != nil {
 		return nil, err
 	}
 
-	// --- Allocate the reusable C buffer for video frames ---
+	// Allocate the reusable C buffer for video frames
 	width := int(*opts.Width)
 	height := int(*opts.Height)
 	bytesPerPixel := 1
@@ -181,7 +181,7 @@ func NewFFmpegEncoder(opts *options.ShaderOptions) (*FFmpegEncoder, error) {
 		}
 	}
 
-	// 5. Open output file and write header
+	// Open output file and write header
 	if (e.formatCtx.oformat.flags & C.AVFMT_NOFILE) == 0 {
 		if C.avio_open(&e.formatCtx.pb, cFilename, C.AVIO_FLAG_WRITE) < 0 {
 			return nil, fmt.Errorf("could not open output file: %s", *opts.OutputFile)
@@ -361,7 +361,7 @@ func (e *FFmpegEncoder) encodeVideo(frameData *Frame) {
 	}
 	planeSize := width * height * bytesPerPixel
 
-	// 1. Copy Go pixel data into our pre-allocated C buffer.
+	// Copy Go pixel data into our pre-allocated C buffer.
 	// This is much faster than allocating new C memory on every frame.
 	C.memcpy(e.videoFrameBuffer, unsafe.Pointer(&frameData.Pixels[0]), C.size_t(len(frameData.Pixels)))
 
@@ -370,7 +370,7 @@ func (e *FFmpegEncoder) encodeVideo(frameData *Frame) {
 
 	srcPlanesSlice := (*[4]*C.uchar)(unsafe.Pointer(srcPlanes))
 
-	// 2. Point the plane pointers to the appropriate locations in our stable C buffer.
+	// Point the plane pointers to the appropriate locations in our stable C buffer.
 	srcPlanesSlice[0] = (*C.uchar)(e.videoFrameBuffer)
 	srcPlanesSlice[1] = (*C.uchar)(unsafe.Add(e.videoFrameBuffer, planeSize))
 	srcPlanesSlice[2] = (*C.uchar)(unsafe.Add(e.videoFrameBuffer, planeSize*2))
@@ -460,16 +460,27 @@ func (e *FFmpegEncoder) SendVideo(frame *Frame) {
 }
 
 func (e *FFmpegEncoder) SendAudio(samples []float32) {
-	if e.audioStream != nil {
+	e.audioMutex.Lock()
+	defer e.audioMutex.Unlock()
+	// Check if the channel is still open before sending
+	if e.audioFrames != nil {
 		e.audioFrames <- samples
+	}
+}
+
+// CloseAudio safely closes the audio channel to signal the end of the audio stream.
+func (e *FFmpegEncoder) CloseAudio() {
+	e.audioMutex.Lock()
+	defer e.audioMutex.Unlock()
+	if e.audioFrames != nil {
+		close(e.audioFrames)
+		e.audioFrames = nil // Prevent further writes
 	}
 }
 
 func (e *FFmpegEncoder) Close() error {
 	close(e.videoFrames)
-	if e.audioStream != nil {
-		close(e.audioFrames)
-	}
+	e.CloseAudio()
 	return <-e.done
 }
 

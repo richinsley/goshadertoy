@@ -44,7 +44,6 @@ static void set_log_callback() {
 }
 */
 import "C"
-import "fmt"
 
 func Platform_init() {
 	// Set the log level. AV_LOG_INFO is a good default.
@@ -56,12 +55,12 @@ func Platform_init() {
 	// Register all available device muxers and demuxers
 	C.avdevice_register_all()
 
-	fmt.Printf("libavcodec version:    %d\n", uint(C.avcodec_version()))
-	fmt.Printf("libavformat version:   %d\n", uint(C.avformat_version()))
-	fmt.Printf("libavutil version:     %d\n", uint(C.avutil_version()))
-	fmt.Printf("libavfilter version:   %d\n", uint(C.avfilter_version()))
-	fmt.Printf("libavdevice version:   %d\n", uint(C.avdevice_version()))
-	fmt.Printf("libpostproc version:   %d\n", uint(C.postproc_version()))
-	fmt.Printf("libswresample version: %d\n", uint(C.swresample_version()))
-	fmt.Printf("libswscale version:    %d\n", uint(C.swscale_version()))
+	// fmt.Printf("libavcodec version:    %d\n", uint(C.avcodec_version()))
+	// fmt.Printf("libavformat version:   %d\n", uint(C.avformat_version()))
+	// fmt.Printf("libavutil version:     %d\n", uint(C.avutil_version()))
+	// fmt.Printf("libavfilter version:   %d\n", uint(C.avfilter_version()))
+	// fmt.Printf("libavdevice version:   %d\n", uint(C.avdevice_version()))
+	// fmt.Printf("libpostproc version:   %d\n", uint(C.postproc_version()))
+	// fmt.Printf("libswresample version: %d\n", uint(C.swresample_version()))
+	// fmt.Printf("libswscale version:    %d\n", uint(C.swscale_version()))
 }

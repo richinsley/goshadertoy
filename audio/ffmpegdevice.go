@@ -1,4 +1,3 @@
-// audio/ffmpegdevice.go
 package audio
 
 import (
@@ -17,8 +16,10 @@ type FFmpegDeviceInput struct {
 func NewFFmpegDeviceInput(options *options.ShaderOptions, buffer *SharedAudioBuffer) (*FFmpegDeviceInput, error) {
 	d := &FFmpegDeviceInput{
 		ffmpegBaseDevice: ffmpegBaseDevice{
-			options: options,
-			buffer:  buffer,
+			audioBaseDevice: audioBaseDevice{
+				options: options,
+				buffer:  buffer,
+			},
 		},
 	}
 

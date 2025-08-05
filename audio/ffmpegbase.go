@@ -1,4 +1,3 @@
-// audio/ffmpegbase.go
 package audio
 
 import (
@@ -8,8 +7,6 @@ import (
 	"sync"
 	"time"
 	"unsafe"
-
-	options "github.com/richinsley/goshadertoy/options"
 )
 
 /*
@@ -37,24 +34,14 @@ import "C"
 
 // ffmpegBaseDevice contains the common logic for all FFmpeg-based audio devices.
 type ffmpegBaseDevice struct {
-	formatCtx           *C.AVFormatContext
-	codecCtx            *C.AVCodecContext
-	swrCtx              *C.SwrContext
-	audioStream         *C.AVStream
-	outChLayout         C.AVChannelLayout
-	audioChan           chan []float32
-	stopChan            chan struct{}
-	sampleRate          int
-	isStreaming         bool
-	player              *AudioPlayer
-	options             *options.ShaderOptions
-	enableRateEmulation bool
-	startTime           time.Time
-	samplesSent         int64
-	buffer              *SharedAudioBuffer
-	cancel              context.CancelFunc
-	mode                string
-	decodeLock          sync.Mutex // To protect decoding resources in passive mode
+	audioBaseDevice // Embed the base device
+	formatCtx       *C.AVFormatContext
+	codecCtx        *C.AVCodecContext
+	swrCtx          *C.SwrContext
+	audioStream     *C.AVStream
+	outChLayout     C.AVChannelLayout
+	isStreaming     bool
+	decodeLock      sync.Mutex // To protect decoding resources in passive mode
 }
 
 // init initializes the FFmpeg libraries and sets up the decoding pipeline.

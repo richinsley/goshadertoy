@@ -18,4 +18,5 @@ type ShaderOptions struct {
 	AudioInputDevice  *string // FFmpeg audio input device string (e.g., a file path or 'avfoundation:default'). Overrides default mic.
 	AudioInputFile    *string // FFmpeg audio input file (e.g., a WAV or MP3 file). Overrides default mic.
 	AudioOutputDevice *string // FFmpeg audio output device string.
+	HasSoundShader    bool
 }
