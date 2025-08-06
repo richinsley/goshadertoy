@@ -5,8 +5,7 @@ package arcana
 
 /*
 #cgo CFLAGS: -I${SRCDIR}/../release/include/arcana
-#cgo LDFLAGS: -L${SRCDIR}/../release/lib
-#cgo pkg-config: --static libavutil_arcana libswresample_arcana libavcodec_arcana libavformat_arcana libswscale_arcana libavfilter_arcana libavdevice_arcana libpostproc_arcana x264 x265
+#cgo LDFLAGS: -L${SRCDIR}/../release/lib -lavdevice_arcana -lavfilter_arcana -lavformat_arcana -lavcodec_arcana -lswscale_arcana -lswresample_arcana -lavutil_arcana -lpostproc_arcana -lx265 -lx264 -liconv -lbz2 -lz -lc++ -framework Foundation -framework AVFoundation -framework AppKit -framework CoreAudio -framework CoreFoundation -framework CoreMedia -framework CoreVideo -framework CoreImage -framework Metal -framework QuartzCore -framework VideoToolbox -framework AudioToolbox -framework Security
 
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>

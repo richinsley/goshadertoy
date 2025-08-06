@@ -2,8 +2,6 @@ package encoder
 
 /*
 #cgo CFLAGS: -I${SRCDIR}/../release/include/arcana
-#cgo LDFLAGS: -L${SRCDIR}/../release/lib
-#cgo pkg-config: --static libavformat_arcana libavcodec_arcana libavutil_arcana libswscale_arcana x264 x265
 
 #include <libavformat/avformat.h>
 #include <libavcodec/avcodec.h>
