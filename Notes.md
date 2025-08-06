@@ -32,3 +32,6 @@ cmake -DCMAKE_BUILD_TYPE=Release \
       -DFFOPT_enable-libnpp=true \
       ..
 make && make install
+
+## build 
+PKG_CONFIG_PATH=$(pwd)/release/lib/pkgconfig CGO_ENABLED=1 go build -ldflags "-w -s" -o goshadertoy ./cmd/main.go
