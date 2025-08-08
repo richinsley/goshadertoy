@@ -80,7 +80,7 @@ func (p *AudioPlayer) getOutputFormatAndDevice() (format, device string) {
 	case "darwin":
 		format = "audiotoolbox"
 	case "linux":
-		format = "pulse"
+		format = "alsa"
 	case "windows":
 		format = "dshow"
 	default:

@@ -43,7 +43,7 @@ func (d *FFmpegDeviceInput) Start() error {
 	case "darwin":
 		format = "avfoundation"
 	case "linux":
-		format = "pulse"
+		format = "alsa"
 	case "windows":
 		format = "dshow"
 	}
