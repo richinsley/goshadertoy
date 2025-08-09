@@ -32,6 +32,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     yasm \
     pkg-config \
     zlib1g-dev \
+    libasound2-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # --- Copy Build Scripts ---
