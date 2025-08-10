@@ -1,10 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
+	"net"
+	"net/http"
 	"os"
 	"runtime"
 	"strings"
@@ -19,7 +24,92 @@ import (
 	renderer "github.com/richinsley/goshadertoy/renderer"
 )
 
+// gamescopeSessionResponse matches the response from the manager service.
+type gamescopeSessionResponse struct {
+	XDGRuntimeDir  string `json:"XDG_RUNTIME_DIR"`
+	WaylandDisplay string `json:"WAYLAND_DISPLAY"`
+	PID            int    `json:"pid"`
+}
+
+// setupGamescopeSession connects to the manager to start a session and configures the environment.
+func setupGamescopeSession(options *options.ShaderOptions) {
+	if options.GamescopeSocket == nil || *options.GamescopeSocket == "" {
+		return // Not using gamescope.
+	}
+	if runtime.GOOS != "linux" {
+		log.Println("Warning: Gamescope integration is only supported on Linux. Ignoring --gamescope-socket flag.")
+		return
+	}
+
+	log.Println("Requesting Gamescope session from manager at", *options.GamescopeSocket)
+
+	httpClient := http.Client{
+		Transport: &http.Transport{
+			DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
+				return net.Dial("unix", *options.GamescopeSocket)
+			},
+		},
+	}
+
+	sessionReq := map[string]interface{}{
+		"width":            *options.Width,
+		"height":           *options.Height,
+		"hdr_enabled":      true, // This could be made a flag in the future
+		"sdr_content_nits": 400,
+		"fullscreen":       true,
+		"fps":              *options.FPS,
+	}
+	reqBody, err := json.Marshal(sessionReq)
+	if err != nil {
+		log.Fatalf("Failed to marshal gamescope session request: %v", err)
+	}
+
+	resp, err := httpClient.Post("http://localhost/session/start", "application/json", bytes.NewBuffer(reqBody))
+	if err != nil {
+		log.Fatalf("Failed to start gamescope session: %v. Is the manager service running on a TTY?", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		log.Fatalf("Error from gamescope manager: %s (%s)", resp.Status, string(body))
+	}
+
+	var sessionResp gamescopeSessionResponse
+	if err := json.NewDecoder(resp.Body).Decode(&sessionResp); err != nil {
+		log.Fatalf("Failed to decode gamescope session response: %v", err)
+	}
+
+	// Set the environment for the current goshadertoy process.
+	os.Setenv("XDG_RUNTIME_DIR", sessionResp.XDGRuntimeDir)
+	os.Setenv("WAYLAND_DISPLAY", sessionResp.WaylandDisplay)
+	os.Unsetenv("DISPLAY") // Ensure Wayland is prioritized
+
+	log.Printf("Gamescope session started (PID: %d). Local environment configured.", sessionResp.PID)
+
+	if options.GamescopeTerminateOnExit != nil && *options.GamescopeTerminateOnExit {
+		log.Println("Will terminate gamescope session on exit.")
+		// This deferred function will execute when runShadertoy returns.
+		defer func() {
+			log.Println("Terminating gamescope session...")
+			resp, err := httpClient.Post("http://localhost/session/stop", "application/json", nil)
+			if err != nil {
+				log.Printf("Failed to stop gamescope session: %v", err)
+				return
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				log.Println("Gamescope session terminated successfully.")
+			} else {
+				body, _ := io.ReadAll(resp.Body)
+				log.Printf("Error stopping gamescope session: %s (%s)", resp.Status, string(body))
+			}
+		}()
+	}
+}
+
 func runShadertoy(shaderArgs *api.ShaderArgs, options *options.ShaderOptions) {
+	setupGamescopeSession(options)
 	arcana.Init()
 
 	mode := *options.Mode
@@ -154,6 +244,9 @@ func main() {
 	options.AudioInputDevice = flag.String("audio-input-device", "", "FFmpeg audio input device string (e.g., a file path or 'avfoundation:default'). Overrides default mic.")
 	options.AudioInputFile = flag.String("audio-input-file", "", "FFmpeg audio input file (e.g., a WAV or MP3 file). Overrides default mic.")
 	options.AudioOutputDevice = flag.String("audio-output-device", "", "FFmpeg audio output device string.")
+
+	options.GamescopeSocket = flag.String("gamescope-socket", "", "Path to the gamescope manager Unix socket. Enables running inside a managed gamescope session.")
+	options.GamescopeTerminateOnExit = flag.Bool("gamescope-terminate-on-exit", false, "Terminate the gamescope session when goshadertoy exits.")
 
 	flag.Parse()
 

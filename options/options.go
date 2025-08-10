@@ -19,4 +19,7 @@ type ShaderOptions struct {
 	AudioInputFile    *string // FFmpeg audio input file (e.g., a WAV or MP3 file). Overrides default mic.
 	AudioOutputDevice *string // FFmpeg audio output device string.
 	HasSoundShader    bool
+	// Gamescope options
+	GamescopeSocket          *string
+	GamescopeTerminateOnExit *bool
 }
