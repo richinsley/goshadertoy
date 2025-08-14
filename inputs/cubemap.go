@@ -6,8 +6,8 @@ import (
 	"image/draw"
 	"log"
 
-	gl "github.com/go-gl/gl/v4.1-core/gl"
-	api "github.com/richinsley/goshadertoy/api"
+	"github.com/go-gl/gl/v4.1-core/gl"
+	"github.com/richinsley/goshadertoy/api"
 )
 
 // CubeMapChannel represents a cube map texture input.
@@ -30,36 +30,26 @@ func NewCubeMapChannel(images [6]image.Image, sampler api.Sampler) (*CubeMapChan
 	gl.GenTextures(1, &textureID)
 	gl.BindTexture(gl.TEXTURE_CUBE_MAP, textureID)
 
-	// Determine the correct internal format for the texture.
 	var internalFormat int32 = gl.RGBA8
 	if sampler.SRGB == "true" {
 		internalFormat = gl.SRGB8_ALPHA8
 		log.Printf("CubeMap Channel: Using sRGB texture format (srgb=true)")
 	}
 
+	// Load all 6 images in their standard order without any flipping.
+	// The `texture` function in GLSL for samplerCube is designed to handle
+	// the coordinate orientation correctly, assuming the image data is not pre-flipped.
 	for i := 0; i < 6; i++ {
+		img := images[i]
+
 		// Convert the input image to RGBA, which is what OpenGL expects.
-		rgba := image.NewRGBA(images[i].Bounds())
-		draw.Draw(rgba, rgba.Bounds(), images[i], image.Point{}, draw.Src)
+		rgba := image.NewRGBA(img.Bounds())
+		draw.Draw(rgba, rgba.Bounds(), img, image.Point{}, draw.Src)
 
-		// Flip the image vertically to match OpenGL's coordinate system.
-		bounds := rgba.Bounds()
-		width := int32(bounds.Dx())
-		height := int32(bounds.Dy())
+		width := int32(rgba.Bounds().Dx())
+		height := int32(rgba.Bounds().Dy())
 
-		flipped := image.NewRGBA(bounds)
-		stride := rgba.Stride // Bytes per row in the source image.
-
-		for y := 0; y < int(height); y++ {
-			srcY := y
-			dstY := int(height) - 1 - y
-
-			srcRow := rgba.Pix[srcY*stride : (srcY+1)*stride]
-			dstRow := flipped.Pix[dstY*stride : (dstY+1)*stride]
-
-			copy(dstRow, srcRow)
-		}
-
+		// Upload the raw, unflipped pixel data.
 		gl.TexImage2D(
 			gl.TEXTURE_CUBE_MAP_POSITIVE_X+uint32(i),
 			0,
@@ -69,8 +59,7 @@ func NewCubeMapChannel(images [6]image.Image, sampler api.Sampler) (*CubeMapChan
 			0,
 			gl.RGBA,
 			gl.UNSIGNED_BYTE,
-			// Use the pixel data from the newly created 'flipped' image.
-			gl.Ptr(flipped.Pix),
+			gl.Ptr(rgba.Pix),
 		)
 	}
 
@@ -104,6 +93,7 @@ func NewCubeMapChannel(images [6]image.Image, sampler api.Sampler) (*CubeMapChan
 }
 
 // --- IChannel Interface Implementation ---
+
 func (c *CubeMapChannel) GetCType() string          { return c.ctype }
 func (c *CubeMapChannel) Update(uniforms *Uniforms) { /* No-op for static cube maps. */ }
 func (c *CubeMapChannel) GetTextureID() uint32      { return c.textureID }
