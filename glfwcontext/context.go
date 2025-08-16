@@ -34,7 +34,18 @@ func New(width, height int, visible bool, share interface{}) (*Context, error) {
 		return nil, err
 	}
 
+	// Set the key callback for the window.
+	win.SetKeyCallback(keyCallback)
+
 	return &Context{window: win}, nil
+}
+
+// keyCallback is the function that will be called on a key event.
+func keyCallback(w *glfw.Window, key glfw.Key, scancode int, action glfw.Action, mods glfw.ModifierKey) {
+	// If the key is ESC and the action is Press, then set the window to close.
+	if key == glfw.KeyEscape && action == glfw.Press {
+		w.SetShouldClose(true)
+	}
 }
 
 // DetachCurrent makes no context current on the calling thread.
