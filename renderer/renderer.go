@@ -18,23 +18,6 @@ import (
 	gst "github.com/richinsley/goshadertranslator"
 )
 
-type RenderPass struct {
-	shaderProgram         uint32
-	channels              []inputs.IChannel
-	buffer                *inputs.Buffer
-	resolutionLoc         int32
-	timeLoc               int32
-	mouseLoc              int32
-	frameLoc              int32
-	iChannelLoc           [4]int32
-	iChannelResolutionLoc int32
-	iDateLoc              int32
-	iSampleRateLoc        int32
-	iTimeDeltaLoc         int32
-	iFrameRateLoc         int32
-	iChannelTimeLoc       int32
-}
-
 func (r *Renderer) isGLES() bool {
 	// In record mode on Linux, we use a headless EGL context which uses GLES.
 	// For all other cases (interactive mode or other OSes), we use GLFW with desktop GL.
@@ -64,7 +47,7 @@ func (r *Renderer) GetRenderPass(name string, shaderArgs *api.ShaderArgs, option
 
 	fullFragmentSource := shader.GetFragmentShader(channels, shaderArgs.CommonCode, passArgs.Code)
 
-	outputFormat := gst.OutputFormatGLSL330
+	outputFormat := gst.OutputFormatGLSL410
 	if r.isGLES() {
 		outputFormat = gst.OutputFormatESSL
 	}
@@ -76,47 +59,47 @@ func (r *Renderer) GetRenderPass(name string, shaderArgs *api.ShaderArgs, option
 	}
 
 	retv := &RenderPass{
-		shaderProgram: 0,
-		channels:      channels,
+		ShaderProgram: 0,
+		Channels:      channels,
 	}
 	if name != "image" {
-		retv.buffer = r.buffers[name]
+		retv.Buffer = r.buffers[name]
 	}
 
 	vertexShaderSource := shader.GenerateVertexShader(r.isGLES())
 
-	retv.shaderProgram, err = newProgram(vertexShaderSource, fsShader.Code)
+	retv.ShaderProgram, err = newProgram(vertexShaderSource, fsShader.Code)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create shader program: %w", err)
 	}
 
 	uniformMap := fsShader.Variables
-	gl.UseProgram(retv.shaderProgram)
+	gl.UseProgram(retv.ShaderProgram)
 
-	retv.resolutionLoc = r.GetUniformLocation(uniformMap, retv.shaderProgram, "iResolution")
-	retv.timeLoc = r.GetUniformLocation(uniformMap, retv.shaderProgram, "iTime")
-	retv.mouseLoc = r.GetUniformLocation(uniformMap, retv.shaderProgram, "iMouse")
-	retv.frameLoc = r.GetUniformLocation(uniformMap, retv.shaderProgram, "iFrame")
-	retv.iDateLoc = r.GetUniformLocation(uniformMap, retv.shaderProgram, "iDate")
-	retv.iSampleRateLoc = r.GetUniformLocation(uniformMap, retv.shaderProgram, "iSampleRate")
-	retv.iTimeDeltaLoc = r.GetUniformLocation(uniformMap, retv.shaderProgram, "iTimeDelta")
-	retv.iFrameRateLoc = r.GetUniformLocation(uniformMap, retv.shaderProgram, "iFrameRate")
+	retv.resolutionLoc = r.GetUniformLocation(uniformMap, retv.ShaderProgram, "iResolution")
+	retv.timeLoc = r.GetUniformLocation(uniformMap, retv.ShaderProgram, "iTime")
+	retv.mouseLoc = r.GetUniformLocation(uniformMap, retv.ShaderProgram, "iMouse")
+	retv.frameLoc = r.GetUniformLocation(uniformMap, retv.ShaderProgram, "iFrame")
+	retv.iDateLoc = r.GetUniformLocation(uniformMap, retv.ShaderProgram, "iDate")
+	retv.iSampleRateLoc = r.GetUniformLocation(uniformMap, retv.ShaderProgram, "iSampleRate")
+	retv.iTimeDeltaLoc = r.GetUniformLocation(uniformMap, retv.ShaderProgram, "iTimeDelta")
+	retv.iFrameRateLoc = r.GetUniformLocation(uniformMap, retv.ShaderProgram, "iFrameRate")
 
-	retv.iChannelTimeLoc = r.GetUniformLocation(uniformMap, retv.shaderProgram, "iChannelTime[0]")
+	retv.iChannelTimeLoc = r.GetUniformLocation(uniformMap, retv.ShaderProgram, "iChannelTime[0]")
 	if retv.iChannelTimeLoc < 0 {
-		retv.iChannelTimeLoc = r.GetUniformLocation(uniformMap, retv.shaderProgram, "iChannelTime")
+		retv.iChannelTimeLoc = r.GetUniformLocation(uniformMap, retv.ShaderProgram, "iChannelTime")
 	}
 
-	retv.iChannelResolutionLoc = r.GetUniformLocation(uniformMap, retv.shaderProgram, "iChannelResolution[0]")
+	retv.iChannelResolutionLoc = r.GetUniformLocation(uniformMap, retv.ShaderProgram, "iChannelResolution[0]")
 	if retv.iChannelResolutionLoc < 0 {
-		retv.iChannelResolutionLoc = r.GetUniformLocation(uniformMap, retv.shaderProgram, "iChannelResolution")
+		retv.iChannelResolutionLoc = r.GetUniformLocation(uniformMap, retv.ShaderProgram, "iChannelResolution")
 	}
 
 	for i := 0; i < 4; i++ {
 		samplerName := fmt.Sprintf("iChannel%d", i)
 		retv.iChannelLoc[i] = -1
 		if v, ok := uniformMap[samplerName]; ok {
-			retv.iChannelLoc[i] = gl.GetUniformLocation(retv.shaderProgram, gl.Str(v.MappedName+"\x00"))
+			retv.iChannelLoc[i] = gl.GetUniformLocation(retv.ShaderProgram, gl.Str(v.MappedName+"\x00"))
 		}
 	}
 
@@ -193,9 +176,9 @@ var quadVertices = []float32{
 	-1.0, 1.0, 1.0, -1.0, 1.0, 1.0,
 }
 
-func (r *Renderer) GetUniformLocation(uniformMap map[string]gst.ShaderVariable, shaderProgram uint32, name string) int32 {
+func (r *Renderer) GetUniformLocation(uniformMap map[string]gst.ShaderVariable, ShaderProgram uint32, name string) int32 {
 	if v, ok := uniformMap[name]; ok {
-		loc := gl.GetUniformLocation(shaderProgram, gl.Str(v.MappedName+"\x00"))
+		loc := gl.GetUniformLocation(ShaderProgram, gl.Str(v.MappedName+"\x00"))
 		if loc < 0 {
 			return -1
 		}
@@ -234,11 +217,11 @@ func (r *Renderer) RenderFrame(time float64, frameCount int32, mouseData [4]floa
 	}
 
 	for _, pass := range r.bufferPasses {
-		if pass.buffer != nil {
-			pass.buffer.BindForWriting()
+		if pass.Buffer != nil {
+			pass.Buffer.BindForWriting()
 		}
 
-		gl.UseProgram(pass.shaderProgram)
+		gl.UseProgram(pass.ShaderProgram)
 		updateUniforms(pass, renderWidth, renderHeight, uniforms)
 		bindChannels(pass, uniforms)
 		gl.Viewport(0, 0, int32(renderWidth), int32(renderHeight))
@@ -247,15 +230,15 @@ func (r *Renderer) RenderFrame(time float64, frameCount int32, mouseData [4]floa
 		gl.DrawArrays(gl.TRIANGLES, 0, 6)
 		unbindChannels(pass)
 
-		if pass.buffer != nil {
-			pass.buffer.UnbindForWriting()
-			pass.buffer.SwapBuffers()
+		if pass.Buffer != nil {
+			pass.Buffer.UnbindForWriting()
+			pass.Buffer.SwapBuffers()
 		}
 	}
 
 	gl.BindFramebuffer(gl.FRAMEBUFFER, r.offscreenRenderer.fbo)
 	imagePass := r.namedPasses["image"]
-	gl.UseProgram(imagePass.shaderProgram)
+	gl.UseProgram(imagePass.ShaderProgram)
 	updateUniforms(imagePass, renderWidth, renderHeight, uniforms)
 	bindChannels(imagePass, uniforms)
 	gl.Viewport(0, 0, int32(renderWidth), int32(renderHeight))
@@ -300,7 +283,7 @@ func (r *Renderer) Run() {
 		var sampleRate float32 = 44100
 		var channelResolutions [4][3]float32
 		if imagePass, ok := r.namedPasses["image"]; ok {
-			for i, ch := range imagePass.channels {
+			for i, ch := range imagePass.Channels {
 				if ch != nil {
 					channelResolutions[i] = ch.ChannelRes()
 					if mic, ok := ch.(interface{ SampleRate() int }); ok {
@@ -401,7 +384,7 @@ func updateUniforms(pass *RenderPass, width, height int, uniforms *inputs.Unifor
 }
 
 func bindChannels(pass *RenderPass, uniforms *inputs.Uniforms) {
-	for chIndex, ch := range pass.channels {
+	for chIndex, ch := range pass.Channels {
 		if ch == nil {
 			continue
 		}
@@ -425,7 +408,7 @@ func bindChannels(pass *RenderPass, uniforms *inputs.Uniforms) {
 }
 
 func unbindChannels(pass *RenderPass) {
-	for chIndex, ch := range pass.channels {
+	for chIndex, ch := range pass.Channels {
 		if ch != nil {
 			var texTarget uint32
 			switch ch.GetSamplerType() {

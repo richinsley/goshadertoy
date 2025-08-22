@@ -119,7 +119,7 @@ func (ssr *SoundShaderRenderer) InitGL() error {
 
 	fullFragmentSource := shader.GenerateSoundShaderSource(ssr.shaderArgs.CommonCode, passArgs.Code, ssr.channels)
 
-	outputFormat := gst.OutputFormatGLSL330
+	outputFormat := gst.OutputFormatGLSL410
 	if ssr.context.IsGLES() {
 		outputFormat = gst.OutputFormatESSL
 	}

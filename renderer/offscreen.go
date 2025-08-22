@@ -12,8 +12,6 @@ import (
 	"github.com/richinsley/goshadertoy/options"
 )
 
-// The local Frame struct is no longer needed here.
-
 type OffscreenRenderer struct {
 	fbo               uint32
 	textureID         uint32
@@ -28,8 +26,6 @@ type OffscreenRenderer struct {
 	yuvFbo            uint32
 	yuvTextureIDs     [3]uint32
 }
-
-const numBuffers = 3 // This is for PBOs, not the old SHM ring buffer
 
 // getFormatForBitDepth controls the pixel format for readback.
 // The output is now always planar YUV.
@@ -185,7 +181,7 @@ func (or *OffscreenRenderer) readYUVPixelsAsync(width, height int) ([]byte, erro
 
 func findMicChannel(r *Renderer) *inputs.MicChannel {
 	for _, pass := range r.namedPasses {
-		for _, ch := range pass.channels {
+		for _, ch := range pass.Channels {
 			if mic, ok := ch.(*inputs.MicChannel); ok {
 				return mic
 			}

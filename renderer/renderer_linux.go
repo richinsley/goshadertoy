@@ -68,13 +68,13 @@ func NewRenderer(width, height int, recordMode bool, bitDepth int, numPBOs int, 
 
 func (r *Renderer) Shutdown() {
 	for _, pass := range r.namedPasses {
-		gl.DeleteProgram(pass.shaderProgram)
+		gl.DeleteProgram(pass.ShaderProgram)
 	}
 	for _, buffer := range r.buffers {
 		buffer.Destroy()
 	}
 	for _, pass := range r.namedPasses {
-		for _, ch := range pass.channels {
+		for _, ch := range pass.Channels {
 			if ch != nil {
 				if _, ok := ch.(*inputs.Buffer); !ok {
 					ch.Destroy()
