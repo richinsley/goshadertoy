@@ -134,7 +134,7 @@ func (b *SharedAudioBuffer) AvailableSamples() int {
 	return b.availableSamples
 }
 
-// --- Window (Peek) Functionality ---
+// Window (Peek) Functionality
 
 func (b *SharedAudioBuffer) updateWindow(samples []float32) {
 	b.windowMu.Lock()
@@ -165,7 +165,7 @@ func (b *SharedAudioBuffer) WindowPeek() []float32 {
 	return result
 }
 
-// --- Helper functions and other accessors ---
+// Helper functions and other accessors
 
 func (b *SharedAudioBuffer) TotalSamplesWritten() int64 {
 	b.mu.Lock()

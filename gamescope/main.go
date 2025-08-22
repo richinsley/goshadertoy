@@ -44,17 +44,17 @@ type SessionState struct {
 	cmd       *exec.Cmd
 	isRunning bool
 	readyChan chan struct{}
-	// **NEW**: Path to the signaler's private control socket
+	// Path to the signaler's private control socket
 	signalerSocketPath string
-	// **NEW**: Channel to notify that the old process has terminated
+	// Channel to notify that the old process has terminated
 	terminationNotifier chan struct{}
 }
 
 var currentSession SessionState
 
-// --- Signaler Logic ---
+// Signaler Logic
 
-// **NEW**: The signaler's terminate handler
+// The signaler's terminate handler
 func terminateHandler(w http.ResponseWriter, r *http.Request) {
 	log.Println("Signaler: Received terminate request. Shutting down.")
 	w.WriteHeader(http.StatusOK)
@@ -68,7 +68,7 @@ func terminateHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func runSignaler() {
-	// **MODIFIED**: Now expects 3 arguments: self, manager_socket, self_socket
+	// Now expects 3 arguments: self, manager_socket, self_socket
 	if len(os.Args) < 4 {
 		log.Fatalf("Signaler internal error: Expected manager and self socket paths. Got: %v", os.Args)
 	}
@@ -123,7 +123,7 @@ func runSignaler() {
 	}
 }
 
-// --- Launcher Logic ---
+// Launcher Logic
 
 func startSessionHandler(w http.ResponseWriter, r *http.Request) {
 	var req SessionRequest
@@ -134,7 +134,7 @@ func startSessionHandler(w http.ResponseWriter, r *http.Request) {
 
 	currentSession.mu.Lock()
 
-	// **NEW**: Logic to handle session restart
+	// Logic to handle session restart
 	if currentSession.isRunning {
 		log.Println("Manager: Active session exists. Attempting to terminate it for restart.")
 
@@ -180,7 +180,7 @@ func startSessionHandler(w http.ResponseWriter, r *http.Request) {
 	readyChan := make(chan struct{})
 	currentSession.readyChan = readyChan
 
-	// **NEW**: Generate a unique socket path for the new signaler instance
+	// Generate a unique socket path for the new signaler instance
 	signalerSocketPath := filepath.Join(signalerSocketDir, fmt.Sprintf("signaler-%d.sock", time.Now().UnixNano()))
 	currentSession.signalerSocketPath = signalerSocketPath
 
@@ -191,7 +191,7 @@ func startSessionHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// **MODIFIED**: Pass the new private signaler socket path as an argument
+	// Pass the new private signaler socket path as an argument
 	gamescopeArgs := buildGamescopeArgs(&req, selfPath, launcherSocketPath, signalerSocketPath)
 
 	cmd := exec.Command("gamescope", gamescopeArgs...)
@@ -209,7 +209,7 @@ func startSessionHandler(w http.ResponseWriter, r *http.Request) {
 	currentSession.cmd = cmd
 	currentSession.isRunning = true
 
-	// **MODIFIED**: The process reaping goroutine now handles the terminationNotifier
+	// The process reaping goroutine now handles the terminationNotifier
 	go func(pid int, sockPath string) {
 		cmd.Wait()
 		log.Printf("Gamescope process PID %d has terminated.", pid)
@@ -226,7 +226,7 @@ func startSessionHandler(w http.ResponseWriter, r *http.Request) {
 				close(currentSession.readyChan)
 				currentSession.readyChan = nil
 			}
-			// **NEW**: Notify the start handler if it's waiting for termination
+			// Notify the start handler if it's waiting for termination
 			if currentSession.terminationNotifier != nil {
 				close(currentSession.terminationNotifier)
 				currentSession.terminationNotifier = nil

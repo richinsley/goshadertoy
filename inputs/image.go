@@ -113,7 +113,7 @@ func NewImageChannel(img image.Image, sampler api.Sampler) (*ImageChannel, error
 	}, nil
 }
 
-// --- IChannel Interface Implementation ---
+// IChannel Interface Implementation
 func (c *ImageChannel) GetCType() string          { return c.ctype }
 func (c *ImageChannel) Update(uniforms *Uniforms) { /*No-op for static images. */ }
 func (c *ImageChannel) GetTextureID() uint32      { return c.textureID }

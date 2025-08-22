@@ -56,7 +56,7 @@ func init() {
 	httpClient.Transport = &headerTransport{Transport: http.DefaultTransport}
 }
 
-// --- Structs for Shadertoy API Response ---
+// Structs for Shadertoy API Response
 
 type ShadertoyResponse struct {
 	Shader *Shader `json:"Shader"`
@@ -166,7 +166,7 @@ func rawShaderToShader(raw rawShader) *Shader {
 	return shader
 }
 
-// --- Structs for Processed Shader Data ---
+// Structs for Processed Shader Data
 
 // ShadertoyChannel represents a generic input channel.
 type ShadertoyChannel struct {

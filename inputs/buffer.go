@@ -139,7 +139,7 @@ func (b *Buffer) UpdateTextureParameters(wrap, filter string, sampler api.Sample
 	b.filter = sampler.Filter
 }
 
-// --- IChannel Interface Implementation ---
+// IChannel Interface Implementation
 func (b *Buffer) GetCType() string          { return b.ctype }
 func (b *Buffer) Update(uniforms *Uniforms) { /* The renderer will handle updating buffers */ }
 func (b *Buffer) ChannelRes() [3]float32    { return b.resolution }

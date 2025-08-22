@@ -108,7 +108,7 @@ func setupGamescopeSession(options *options.ShaderOptions) {
 	}
 }
 
-func runShadertoy(shaderArgs *api.ShaderArgs, options *options.ShaderOptions) {
+func runShadertoy(initialShaderArgs *api.ShaderArgs, options *options.ShaderOptions) {
 	setupGamescopeSession(options)
 	arcana.Init()
 
@@ -121,7 +121,8 @@ func runShadertoy(shaderArgs *api.ShaderArgs, options *options.ShaderOptions) {
 	// This channel connects the sound renderer (producer) to the audio feeder (consumer).
 	preRenderedAudio := make(chan []float32, 4)
 
-	_, options.HasSoundShader = shaderArgs.Buffers["sound"]
+	// Determine if a sound shader is present
+	_, options.HasSoundShader = initialShaderArgs.Buffers["sound"]
 	if options.HasSoundShader {
 		log.Println("Sound shader detected, using it as the primary audio source.")
 		audioDevice, err = audio.NewShaderAudioDevice(options, preRenderedAudio, soundSampleRate)
@@ -129,7 +130,7 @@ func runShadertoy(shaderArgs *api.ShaderArgs, options *options.ShaderOptions) {
 			log.Fatalf("Failed to create shader audio device: %v", err)
 		}
 	} else {
-		// If there's no sound shader, use the FFmpeg device/file input as before.
+		// If there's no sound shader, use an FFmpeg device or file input
 		audioDevice, err = audio.NewFFmpegAudioDevice(options)
 		if err != nil {
 			log.Fatalf("Failed to create audio device: %v", err)
@@ -137,9 +138,9 @@ func runShadertoy(shaderArgs *api.ShaderArgs, options *options.ShaderOptions) {
 	}
 	defer audioDevice.Stop()
 
-	// --- CONTEXT CREATION ---
+	// CONTEXT CREATION
 	var visualContext, soundContext graphics.Context
-	if isRecord && runtime.GOOS == "linux" {
+	if isRecord && runtime.GOOS == "linux" { // For recording on Linux, use headless EGL contexts
 		log.Println("Record mode on Linux: Using headless EGL contexts.")
 		visualContext, err = headless.NewHeadless(*options.Width, *options.Height)
 		if err != nil {
@@ -151,7 +152,7 @@ func runShadertoy(shaderArgs *api.ShaderArgs, options *options.ShaderOptions) {
 				log.Fatalf("Failed to create headless sound context: %v", err)
 			}
 		}
-	} else {
+	} else { // Otherwise, use a visible GLFW context
 		log.Println("Using GLFW contexts.")
 		if err := glfwcontext.InitGraphics(); err != nil {
 			log.Fatalf("Failed to initialize graphics: %v", err)
@@ -163,7 +164,7 @@ func runShadertoy(shaderArgs *api.ShaderArgs, options *options.ShaderOptions) {
 			log.Fatalf("Failed to create visual GLFW context: %v", err)
 		}
 		if options.HasSoundShader {
-			// Create a second, hidden, shared context for the sound renderer.
+			// Create a second, hidden, shared context for the sound renderer
 			soundContext, err = glfwcontext.New(1, 1, false, visualContext.GetWindow())
 			if err != nil {
 				log.Fatalf("Failed to create hidden sound context: %v", err)
@@ -171,25 +172,31 @@ func runShadertoy(shaderArgs *api.ShaderArgs, options *options.ShaderOptions) {
 		}
 	}
 
-	// Create the renderer
+	// Create the scene-agnostic renderer
 	r, err := renderer.NewRenderer(*options.Width, *options.Height, isRecord, *options.BitDepth, *options.NumPBOs, audioDevice, visualContext)
 	if err != nil {
 		log.Fatalf("Failed to create renderer: %v", err)
 	}
 	defer r.Shutdown()
 
-	err = r.InitScene(shaderArgs, options)
+	// Load the initial shader data into a Scene object
+	initialScene, err := r.LoadScene(initialShaderArgs, options)
 	if err != nil {
 		log.Fatalf("Failed to initialize scene: %v", err)
 	}
+
+	// Set the newly loaded scene as the active one for the renderer
+	r.SetScene(initialScene)
+	// (In the future, you could load other scenes here and use r.SetScene() to switch between them)
+	// END NEW WORKFLOW
 
 	// Start concurrent processes
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	if options.HasSoundShader {
-		// Start the PRODUCER goroutine (GPU rendering)
-		soundRenderer := renderer.NewSoundShaderRenderer(soundContext, preRenderedAudio, shaderArgs, options)
+		// The sound renderer is tied to a specific shader's arguments
+		soundRenderer := renderer.NewSoundShaderRenderer(soundContext, preRenderedAudio, initialShaderArgs, options)
 		go func() {
 			runtime.LockOSThread()
 			if err := soundRenderer.InitGL(); err != nil {
@@ -199,12 +206,12 @@ func runShadertoy(shaderArgs *api.ShaderArgs, options *options.ShaderOptions) {
 		}()
 	}
 
-	// Start the audio device's own internal loop (for FFmpeg sources or shader audio)
+	// Start the audio device's own internal loop
 	if err := audioDevice.Start(); err != nil {
 		log.Fatalf("Failed to start audio device: %v", err)
 	}
 
-	// Run the main loop
+	// Run the main loop; Run() and RunOffscreen() will use the active scene set above
 	switch mode {
 	case "record", "stream":
 		log.Printf("Starting %s mode...", mode)

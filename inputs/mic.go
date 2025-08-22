@@ -90,7 +90,7 @@ func (c *MicChannel) ProcessAudio(monoSamples []float32) {
 	c.dataMutex.Lock()
 	defer c.dataMutex.Unlock()
 
-	// --- Process FFT (Frequency) Data ---
+	// Process FFT (Frequency) Data
 	for i := 0; i < textureWidth; i++ {
 		re := real(fftResult[i])
 		im := imag(fftResult[i])
@@ -112,7 +112,7 @@ func (c *MicChannel) ProcessAudio(monoSamples []float32) {
 		c.textureData[i*2+1] = 0.0
 	}
 
-	// --- Process Waveform Data ---
+	// Process Waveform Data
 	waveSegment := monoSamples[len(monoSamples)-textureWidth:]
 	for i := 0; i < textureWidth; i++ {
 		c.textureData[(textureWidth+i)*2] = (waveSegment[i] + 1.0) * 0.5
@@ -139,7 +139,7 @@ func (c *MicChannel) Destroy() {
 	gl.DeleteTextures(1, &c.textureID)
 }
 
-// --- IChannel Interface Implementation ---
+// IChannel Interface Implementation
 func (c *MicChannel) GetCType() string       { return c.ctype }
 func (c *MicChannel) GetTextureID() uint32   { return c.textureID }
 func (c *MicChannel) GetSamplerType() string { return "sampler2D" }

@@ -92,7 +92,7 @@ func NewCubeMapChannel(images [6]image.Image, sampler api.Sampler) (*CubeMapChan
 	}, nil
 }
 
-// --- IChannel Interface Implementation ---
+// IChannel Interface Implementation
 
 func (c *CubeMapChannel) GetCType() string          { return c.ctype }
 func (c *CubeMapChannel) Update(uniforms *Uniforms) { /* No-op for static cube maps. */ }

@@ -8,13 +8,9 @@ import (
 	"time"
 
 	gl "github.com/go-gl/gl/v4.1-core/gl"
-	api "github.com/richinsley/goshadertoy/api"
 	audio "github.com/richinsley/goshadertoy/audio"
 	glfwcontext "github.com/richinsley/goshadertoy/glfwcontext"
 	inputs "github.com/richinsley/goshadertoy/inputs"
-	options "github.com/richinsley/goshadertoy/options"
-	shader "github.com/richinsley/goshadertoy/shader"
-	xlate "github.com/richinsley/goshadertoy/translator"
 	gst "github.com/richinsley/goshadertranslator"
 )
 
@@ -22,153 +18,6 @@ func (r *Renderer) isGLES() bool {
 	// In record mode on Linux, we use a headless EGL context which uses GLES.
 	// For all other cases (interactive mode or other OSes), we use GLFW with desktop GL.
 	return r.recordMode && runtime.GOOS == "linux"
-}
-
-func (r *Renderer) GetRenderPass(name string, shaderArgs *api.ShaderArgs, options *options.ShaderOptions) (*RenderPass, error) {
-	if name == "" {
-		name = "image"
-	}
-
-	var passArgs *api.BufferRenderPass
-	var exists bool
-	if passArgs, exists = shaderArgs.Buffers[name]; !exists {
-		return nil, fmt.Errorf("no render pass found with name: %s", name)
-	}
-
-	width, height := r.width, r.height
-	if r.context != nil {
-		width, height = r.context.GetFramebufferSize()
-	}
-
-	channels, err := inputs.GetChannels(passArgs.Inputs, width, height, r.quadVAO, r.buffers, options, r.audioDevice)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create channels: %w", err)
-	}
-
-	fullFragmentSource := shader.GetFragmentShader(channels, shaderArgs.CommonCode, passArgs.Code)
-
-	outputFormat := gst.OutputFormatGLSL410
-	if r.isGLES() {
-		outputFormat = gst.OutputFormatESSL
-	}
-
-	translator := xlate.GetTranslator()
-	fsShader, err := translator.TranslateShader(fullFragmentSource, "fragment", gst.ShaderSpecWebGL2, outputFormat)
-	if err != nil {
-		return nil, fmt.Errorf("fragment shader translation failed: %w", err)
-	}
-
-	retv := &RenderPass{
-		ShaderProgram: 0,
-		Channels:      channels,
-	}
-	if name != "image" {
-		retv.Buffer = r.buffers[name]
-	}
-
-	vertexShaderSource := shader.GenerateVertexShader(r.isGLES())
-
-	retv.ShaderProgram, err = newProgram(vertexShaderSource, fsShader.Code)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create shader program: %w", err)
-	}
-
-	uniformMap := fsShader.Variables
-	gl.UseProgram(retv.ShaderProgram)
-
-	retv.resolutionLoc = r.GetUniformLocation(uniformMap, retv.ShaderProgram, "iResolution")
-	retv.timeLoc = r.GetUniformLocation(uniformMap, retv.ShaderProgram, "iTime")
-	retv.mouseLoc = r.GetUniformLocation(uniformMap, retv.ShaderProgram, "iMouse")
-	retv.frameLoc = r.GetUniformLocation(uniformMap, retv.ShaderProgram, "iFrame")
-	retv.iDateLoc = r.GetUniformLocation(uniformMap, retv.ShaderProgram, "iDate")
-	retv.iSampleRateLoc = r.GetUniformLocation(uniformMap, retv.ShaderProgram, "iSampleRate")
-	retv.iTimeDeltaLoc = r.GetUniformLocation(uniformMap, retv.ShaderProgram, "iTimeDelta")
-	retv.iFrameRateLoc = r.GetUniformLocation(uniformMap, retv.ShaderProgram, "iFrameRate")
-
-	retv.iChannelTimeLoc = r.GetUniformLocation(uniformMap, retv.ShaderProgram, "iChannelTime[0]")
-	if retv.iChannelTimeLoc < 0 {
-		retv.iChannelTimeLoc = r.GetUniformLocation(uniformMap, retv.ShaderProgram, "iChannelTime")
-	}
-
-	retv.iChannelResolutionLoc = r.GetUniformLocation(uniformMap, retv.ShaderProgram, "iChannelResolution[0]")
-	if retv.iChannelResolutionLoc < 0 {
-		retv.iChannelResolutionLoc = r.GetUniformLocation(uniformMap, retv.ShaderProgram, "iChannelResolution")
-	}
-
-	for i := 0; i < 4; i++ {
-		samplerName := fmt.Sprintf("iChannel%d", i)
-		retv.iChannelLoc[i] = -1
-		if v, ok := uniformMap[samplerName]; ok {
-			retv.iChannelLoc[i] = gl.GetUniformLocation(retv.ShaderProgram, gl.Str(v.MappedName+"\x00"))
-		}
-	}
-
-	return retv, nil
-}
-
-func (r *Renderer) InitScene(shaderArgs *api.ShaderArgs, options *options.ShaderOptions) error {
-	var err error
-	var vbo uint32
-	gl.GenVertexArrays(1, &r.quadVAO)
-	gl.GenBuffers(1, &vbo)
-	gl.BindVertexArray(r.quadVAO)
-	gl.BindBuffer(gl.ARRAY_BUFFER, vbo)
-	gl.BufferData(gl.ARRAY_BUFFER, len(quadVertices)*4, gl.Ptr(quadVertices), gl.STATIC_DRAW)
-	gl.EnableVertexAttribArray(0)
-	gl.VertexAttribPointer(0, 2, gl.FLOAT, false, 2*4, gl.PtrOffset(0))
-	gl.BindBuffer(gl.ARRAY_BUFFER, 0)
-	gl.BindVertexArray(0)
-
-	blitVertexSource := shader.GenerateVertexShader(r.isGLES())
-	blitFragmentSource := shader.GetBlitFragmentShader(r.recordMode, r.isGLES())
-	yuvFragmentSource := shader.GetYUVFragmentShader(r.isGLES())
-
-	r.blitProgram, err = newProgram(blitVertexSource, blitFragmentSource)
-	if err != nil {
-		return fmt.Errorf("failed to create blit program: %w", err)
-	}
-
-	r.yuvProgram, err = newProgram(blitVertexSource, yuvFragmentSource)
-	if err != nil {
-		return fmt.Errorf("failed to create yuv program: %w", err)
-	}
-	r.yuvBitDepthLoc = gl.GetUniformLocation(r.yuvProgram, gl.Str("u_bitDepth\x00"))
-
-	width, height := r.width, r.height
-	if !r.recordMode && r.context != nil {
-		width, height = r.context.GetFramebufferSize()
-	}
-
-	for _, name := range []string{"A", "B", "C", "D"} {
-		if _, exists := shaderArgs.Buffers[name]; exists {
-			buffer, err := inputs.NewBuffer(width, height, r.quadVAO)
-			if err != nil {
-				return fmt.Errorf("failed to create buffer %s: %w", name, err)
-			}
-			r.buffers[name] = buffer
-		}
-	}
-
-	passnames := []string{"A", "B", "C", "D", "image"}
-	for _, name := range passnames {
-		pass, err := r.GetRenderPass(name, shaderArgs, options)
-		if err != nil {
-			if strings.HasPrefix(err.Error(), "no render pass found with name") {
-				continue
-			}
-			return fmt.Errorf("failed to create render pass %s: %v", name, err)
-		}
-		r.namedPasses[name] = pass
-		if name != "image" {
-			r.bufferPasses = append(r.bufferPasses, pass)
-		}
-	}
-
-	log.Printf("OpenGL Vendor: %s", gl.GoStr(gl.GetString(gl.VENDOR)))
-	log.Printf("OpenGL Renderer: %s", gl.GoStr(gl.GetString(gl.RENDERER)))
-	log.Printf("OpenGL Version: %s", gl.GoStr(gl.GetString(gl.VERSION)))
-
-	return nil
 }
 
 var quadVertices = []float32{
@@ -187,7 +36,22 @@ func (r *Renderer) GetUniformLocation(uniformMap map[string]gst.ShaderVariable, 
 	return -1
 }
 
-func (r *Renderer) RenderFrame(time float64, frameCount int32, mouseData [4]float32, uniforms *inputs.Uniforms) {
+// SetScene allows switching the active scene. It returns the previously active scene
+// so the caller can choose to destroy it.
+func (r *Renderer) SetScene(scene *Scene) *Scene {
+	previousScene := r.activeScene
+	r.activeScene = scene
+	if scene != nil {
+		log.Printf("Renderer active scene set to: %s", scene.Title)
+	}
+	return previousScene
+}
+
+func (r *Renderer) RenderFrame(uniforms *inputs.Uniforms) {
+	if r.activeScene == nil {
+		return // Can't render without a scene
+	}
+
 	var renderWidth, renderHeight int
 
 	if r.recordMode {
@@ -198,55 +62,67 @@ func (r *Renderer) RenderFrame(time float64, frameCount int32, mouseData [4]floa
 		renderWidth = fbWidth
 		renderHeight = fbHeight
 
+		// Check if the framebuffer size has changed
 		if fbWidth != r.offscreenRenderer.width || fbHeight != r.offscreenRenderer.height {
+			log.Printf("Resizing renderer and scene buffers to %dx%d", fbWidth, fbHeight)
+
+			// Resize the renderer's own FBO
 			r.offscreenRenderer.width = fbWidth
 			r.offscreenRenderer.height = fbHeight
 			gl.BindTexture(gl.TEXTURE_2D, r.offscreenRenderer.textureID)
 			gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, int32(fbWidth), int32(fbHeight), 0, gl.RGBA, gl.FLOAT, nil)
-
 			gl.BindRenderbuffer(gl.RENDERBUFFER, r.offscreenRenderer.depthRenderbuffer)
 			gl.RenderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, int32(fbWidth), int32(fbHeight))
 
-			for _, buffer := range r.buffers {
+			// IMPORTANT: Resize the active scene's buffers
+			for _, buffer := range r.activeScene.Buffers {
 				buffer.Resize(fbWidth, fbHeight)
 			}
 		}
 	} else {
+		// Fallback for unexpected configurations
 		renderWidth = r.width
 		renderHeight = r.height
 	}
 
-	for _, pass := range r.bufferPasses {
-		if pass.Buffer != nil {
-			pass.Buffer.BindForWriting()
+	// Render Buffer Passes from the Active Scene
+	for _, pass := range r.activeScene.BufferPasses {
+		if pass.Buffer == nil {
+			continue // Should not happen, but a safe check
 		}
+
+		pass.Buffer.BindForWriting()
 
 		gl.UseProgram(pass.ShaderProgram)
 		updateUniforms(pass, renderWidth, renderHeight, uniforms)
 		bindChannels(pass, uniforms)
+
 		gl.Viewport(0, 0, int32(renderWidth), int32(renderHeight))
 		gl.Clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT)
 		gl.BindVertexArray(r.quadVAO)
 		gl.DrawArrays(gl.TRIANGLES, 0, 6)
-		unbindChannels(pass)
 
-		if pass.Buffer != nil {
-			pass.Buffer.UnbindForWriting()
-			pass.Buffer.SwapBuffers()
-		}
+		unbindChannels(pass)
+		pass.Buffer.UnbindForWriting()
+		pass.Buffer.SwapBuffers()
 	}
 
-	gl.BindFramebuffer(gl.FRAMEBUFFER, r.offscreenRenderer.fbo)
-	imagePass := r.namedPasses["image"]
-	gl.UseProgram(imagePass.ShaderProgram)
-	updateUniforms(imagePass, renderWidth, renderHeight, uniforms)
-	bindChannels(imagePass, uniforms)
-	gl.Viewport(0, 0, int32(renderWidth), int32(renderHeight))
-	gl.Clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT)
-	gl.BindVertexArray(r.quadVAO)
-	gl.DrawArrays(gl.TRIANGLES, 0, 6)
-	unbindChannels(imagePass)
-	gl.BindFramebuffer(gl.FRAMEBUFFER, 0)
+	// Render the Final Image Pass from the Active Scene
+	imagePass := r.activeScene.ImagePass
+	if imagePass != nil {
+		gl.BindFramebuffer(gl.FRAMEBUFFER, r.offscreenRenderer.fbo)
+		gl.UseProgram(imagePass.ShaderProgram)
+		updateUniforms(imagePass, renderWidth, renderHeight, uniforms)
+		bindChannels(imagePass, uniforms)
+
+		gl.Viewport(0, 0, int32(renderWidth), int32(renderHeight))
+		gl.Clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT)
+		gl.BindVertexArray(r.quadVAO)
+		gl.DrawArrays(gl.TRIANGLES, 0, 6)
+
+		unbindChannels(imagePass)
+		gl.BindFramebuffer(gl.FRAMEBUFFER, 0)
+	}
 }
 
 func (r *Renderer) RenderToYUV() {
@@ -264,26 +140,34 @@ func (r *Renderer) RenderToYUV() {
 
 func (r *Renderer) Run() {
 	if r.context == nil {
-		return
+		return // Cannot run in interactive mode without a window context
 	}
 	startTime := r.context.Time()
 	var frameCount int32 = 0
 	var lastFrameTime = r.context.Time()
-	micChannel := findMicChannel(r) // Helper to find the mic channel instance
 
 	for !r.context.ShouldClose() {
+		// If no scene is active, just clear the screen and continue.
+		if r.activeScene == nil {
+			fbWidth, fbHeight := r.context.GetFramebufferSize()
+			gl.Viewport(0, 0, int32(fbWidth), int32(fbHeight))
+			gl.ClearColor(0.0, 0.0, 0.0, 1.0)
+			gl.Clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT)
+			r.context.EndFrame()
+			continue
+		}
+
 		currentTime := r.context.Time() - startTime
 		timeDelta := float32(currentTime - lastFrameTime)
 		lastFrameTime = currentTime
 
-		// This block is now much simpler and cleaner!
-		// It relies on the context to provide the mouse data.
 		mouseData := r.context.GetMouseInput()
 
 		var sampleRate float32 = 44100
 		var channelResolutions [4][3]float32
-		if imagePass, ok := r.namedPasses["image"]; ok {
-			for i, ch := range imagePass.Channels {
+		// Get channel info from the active scene's image pass
+		if r.activeScene.ImagePass != nil {
+			for i, ch := range r.activeScene.ImagePass.Channels {
 				if ch != nil {
 					channelResolutions[i] = ch.ChannelRes()
 					if mic, ok := ch.(interface{ SampleRate() int }); ok {
@@ -303,12 +187,14 @@ func (r *Renderer) Run() {
 			TimeDelta:         timeDelta,
 			FrameRate:         frameRate,
 			Frame:             frameCount,
-			Mouse:             mouseData, // Use the data from GetMouseInput
+			Mouse:             mouseData,
 			ChannelTime:       [4]float32{float32(currentTime), float32(currentTime), float32(currentTime), float32(currentTime)},
 			SampleRate:        sampleRate,
 			ChannelResolution: channelResolutions,
 		}
 
+		// Find the mic channel within the active scene
+		micChannel := findMicChannel(r.activeScene)
 		if micChannel != nil {
 			const fftInputSize = 2048 // From inputs/mic.go
 			samples := r.audioDevice.GetBuffer().WindowPeek()
@@ -316,10 +202,9 @@ func (r *Renderer) Run() {
 			micChannel.ProcessAudio(monoSamples)
 		}
 
-		r.RenderFrame(currentTime, frameCount, mouseData, uniforms)
+		r.RenderFrame(uniforms)
 
-		// This part is for drawing to the screen, which only happens in a windowed context.
-		// A type assertion is appropriate here.
+		// Blit the final rendered texture to the screen
 		if _, ok := r.context.(*glfwcontext.Context); ok {
 			fbWidth, fbHeight := r.context.GetFramebufferSize()
 			gl.Viewport(0, 0, int32(fbWidth), int32(fbHeight))

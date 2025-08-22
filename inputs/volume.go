@@ -124,7 +124,7 @@ func getVolumeFormat(numChannels uint8, binFormat uint16) (internalFormat int32,
 	return
 }
 
-// --- IChannel Interface Implementation ---
+// IChannel Interface Implementation
 func (c *VolumeChannel) GetCType() string          { return c.ctype }
 func (c *VolumeChannel) Update(uniforms *Uniforms) { /* No-op for static volumes */ }
 func (c *VolumeChannel) GetTextureID() uint32      { return c.textureID }

@@ -191,7 +191,7 @@ func (ssr *SoundShaderRenderer) Run(ctx context.Context) {
 			// Continue to render the next large buffer.
 		}
 
-		// --- Render one large buffer ---
+		// Render one large buffer
 		gl.BindFramebuffer(gl.FRAMEBUFFER, ssr.fbo)
 		gl.UseProgram(ssr.program)
 
@@ -208,7 +208,7 @@ func (ssr *SoundShaderRenderer) Run(ctx context.Context) {
 		gl.DrawArrays(gl.TRIANGLES, 0, 6)
 		unbindChannelsSound(ssr)
 
-		// --- Read the entire large buffer back ---
+		// Read the entire large buffer back
 		pixelData := make([]byte, samplesPerFullBuffer*4)
 		gl.ReadBuffer(gl.COLOR_ATTACHMENT0)
 		gl.ReadPixels(0, 0, soundTextureWidth, soundTextureHeight, gl.RGBA, gl.UNSIGNED_BYTE, gl.Ptr(pixelData))

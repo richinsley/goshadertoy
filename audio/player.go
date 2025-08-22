@@ -61,7 +61,7 @@ type AudioPlayer struct {
 	buffer         *SharedAudioBuffer
 	cancel         context.CancelFunc
 
-	// --- Re-instated frames for robust memory management ---
+	// Re-instated frames for robust memory management
 	swrCtx             *C.struct_SwrContext
 	srcFrame           *C.AVFrame // Reusable source frame (always FLT)
 	dstFrame           *C.AVFrame // Reusable destination frame (target format)
@@ -168,7 +168,7 @@ func (p *AudioPlayer) Start(buffer *SharedAudioBuffer) error {
 		return fmt.Errorf("failed to initialize resampler context")
 	}
 
-	// --- Allocate and configure reusable AVFrames ---
+	// Allocate and configure reusable AVFrames
 	p.srcFrame = C.av_frame_alloc()
 	p.dstFrame = C.av_frame_alloc()
 	p.packet = C.av_packet_alloc()

@@ -62,7 +62,7 @@ func NewOffscreenRenderer(width, height, bitDepth, numPBOs int) (*OffscreenRende
 		colorTextureType = gl.UNSIGNED_BYTE
 	}
 
-	// --- Create Main FBO for rendering ---
+	// Create Main FBO for rendering
 	gl.GenFramebuffers(1, &or.fbo)
 	gl.BindFramebuffer(gl.FRAMEBUFFER, or.fbo)
 	gl.GenTextures(1, &or.textureID)
@@ -79,7 +79,7 @@ func NewOffscreenRenderer(width, height, bitDepth, numPBOs int) (*OffscreenRende
 		return nil, fmt.Errorf("main offscreen fbo is not complete")
 	}
 
-	// --- Create YUV FBO for conversion ---
+	// Create YUV FBO for conversion
 	gl.GenFramebuffers(1, &or.yuvFbo)
 	gl.BindFramebuffer(gl.FRAMEBUFFER, or.yuvFbo)
 	gl.GenTextures(3, &or.yuvTextureIDs[0])
@@ -101,7 +101,7 @@ func NewOffscreenRenderer(width, height, bitDepth, numPBOs int) (*OffscreenRende
 		return nil, fmt.Errorf("yuv fbo is not complete")
 	}
 
-	// --- PBO Initialization ---
+	// PBO Initialization
 	gl.GenBuffers(int32(len(or.pbos)), &or.pbos[0])
 	_, _, pixelType := getFormatForBitDepth(bitDepth)
 	var bytesPerPixel int
@@ -179,8 +179,12 @@ func (or *OffscreenRenderer) readYUVPixelsAsync(width, height int) ([]byte, erro
 	return yuvData, nil
 }
 
-func findMicChannel(r *Renderer) *inputs.MicChannel {
-	for _, pass := range r.namedPasses {
+func findMicChannel(scene *Scene) *inputs.MicChannel {
+	if scene == nil {
+		return nil
+	}
+	// It's sufficient to check the named passes as they are a superset
+	for _, pass := range scene.NamedPasses {
 		for _, ch := range pass.Channels {
 			if mic, ok := ch.(*inputs.MicChannel); ok {
 				return mic
@@ -231,7 +235,7 @@ func (r *Renderer) runStreamMode(options *options.ShaderOptions) error {
 	if *options.Prewarm {
 		log.Println("Pre-warming renderer...")
 		for i := 0; i < len(r.offscreenRenderer.pbos); i++ {
-			r.RenderFrame(0, int32(i), [4]float32{0, 0, 0, 0}, &inputs.Uniforms{})
+			r.RenderFrame(&inputs.Uniforms{})
 			r.RenderToYUV()
 		}
 		log.Println("Pre-warming complete.")
@@ -259,7 +263,7 @@ func (r *Renderer) runStreamMode(options *options.ShaderOptions) error {
 				Frame:     int32(frameCounter),
 			}
 
-			r.RenderFrame(simTime, int32(frameCounter), [4]float32{0, 0, 0, 0}, uniforms)
+			r.RenderFrame(uniforms)
 			r.RenderToYUV()
 
 			gl.BindFramebuffer(gl.READ_FRAMEBUFFER, r.offscreenRenderer.yuvFbo)
@@ -291,7 +295,7 @@ func (r *Renderer) runRecordMode(options *options.ShaderOptions) error {
 	timeStep := 1.0 / float64(*options.FPS)
 	sampleRate := r.audioDevice.SampleRate()
 	samplesPerFrame := sampleRate / *options.FPS
-	micChannel := findMicChannel(r)
+	micChannel := findMicChannel(r.activeScene)
 	hasAudio := r.audioDevice != nil && (*options.AudioInputFile != "" || *options.AudioInputDevice != "" || options.HasSoundShader)
 
 	for i := 0; i < totalFrames; i++ {
@@ -331,8 +335,7 @@ func (r *Renderer) runRecordMode(options *options.ShaderOptions) error {
 			}
 		}
 
-		// fmt.Println("Rendering frame", i, "at time", currentTime)
-		r.RenderFrame(currentTime, int32(i), [4]float32{0, 0, 0, 0}, uniforms)
+		r.RenderFrame(uniforms)
 		r.RenderToYUV()
 
 		gl.BindFramebuffer(gl.READ_FRAMEBUFFER, r.offscreenRenderer.yuvFbo)
