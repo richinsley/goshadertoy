@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/go-gl/glfw/v3.3/glfw"
 	api "github.com/richinsley/goshadertoy/api"
 	arcana "github.com/richinsley/goshadertoy/arcana"
 	audio "github.com/richinsley/goshadertoy/audio"
@@ -108,7 +109,7 @@ func setupGamescopeSession(options *options.ShaderOptions) {
 	}
 }
 
-func runShadertoy(initialShaderArgs *api.ShaderArgs, options *options.ShaderOptions) {
+func runShadertoy(initialShaderArgs *api.ShaderArgs, shaderIDs []string, options *options.ShaderOptions) {
 	setupGamescopeSession(options)
 	arcana.Init()
 
@@ -179,16 +180,74 @@ func runShadertoy(initialShaderArgs *api.ShaderArgs, options *options.ShaderOpti
 	}
 	defer r.Shutdown()
 
-	// Load the initial shader data into a Scene object
-	initialScene, err := r.LoadScene(initialShaderArgs, options)
-	if err != nil {
-		log.Fatalf("Failed to initialize scene: %v", err)
+	sceneCache := make(map[string]*renderer.Scene)
+	sceneOrder := make([]string, 0, len(shaderIDs))
+	var currentSceneIndex int = 0
+
+	// The hardcoded list is gone. We now iterate over the `shaderIDs` slice passed into the function.
+	for i, id := range shaderIDs {
+		var argsToLoad *api.ShaderArgs
+		// The arguments for the first shader are already loaded, so we can reuse them.
+		if i == 0 {
+			argsToLoad = initialShaderArgs
+		} else {
+			log.Printf("Loading scene for shader ID: %s", id)
+			json, err := api.ShaderFromID("", id, true)
+			if err != nil {
+				log.Printf("Warning: Failed to fetch shader %s: %v", id, err)
+				continue
+			}
+			argsToLoad, err = api.ShaderArgsFromJSON(json, true)
+			if err != nil {
+				log.Printf("Warning: Failed to process shader %s: %v", id, err)
+				continue
+			}
+		}
+
+		scene, err := r.LoadScene(argsToLoad, options)
+		if err != nil {
+			log.Printf("Warning: Failed to load scene for shader %s: %v", id, err)
+			continue
+		}
+		sceneCache[id] = scene
+		sceneOrder = append(sceneOrder, id)
 	}
 
-	// Set the newly loaded scene as the active one for the renderer
-	r.SetScene(initialScene)
-	// (In the future, you could load other scenes here and use r.SetScene() to switch between them)
-	// END NEW WORKFLOW
+	if len(sceneOrder) == 0 {
+		log.Fatalf("No scenes could be loaded. Exiting.")
+	}
+
+	// set the initial scene
+	r.SetScene(sceneCache[sceneOrder[0]])
+
+	// Register key callbacks for scene switching if we are in interactive mode
+	if !isRecord {
+		// Type assert the context to access the RegisterKeyCallback method
+		if gctx, ok := visualContext.(*glfwcontext.Context); ok {
+			for i := 0; i < len(sceneOrder) && i < 9; i++ { // Support keys 1 through 9
+				sceneIndex := i // Capture the loop variable
+				key := glfw.Key1 + glfw.Key(sceneIndex)
+
+				gctx.RegisterKeyCallback(key, func() {
+					if sceneIndex == currentSceneIndex {
+						return // Don't switch to the same scene
+					}
+
+					sceneID := sceneOrder[sceneIndex]
+					log.Printf("Switching to scene %d: %s ('%s')", sceneIndex+1, sceneID, sceneCache[sceneID].Title)
+
+					previousScene := r.SetScene(sceneCache[sceneID])
+
+					// IMPORTANT: Destroy the old scene to free up GPU resources
+					if previousScene != nil {
+						// previousScene.Destroy()
+					}
+
+					currentSceneIndex = sceneIndex
+				})
+			}
+		}
+	}
 
 	// Start concurrent processes
 	ctx, cancel := context.WithCancel(context.Background())
@@ -234,7 +293,7 @@ func main() {
 	// Command-line flags
 	options := &options.ShaderOptions{}
 	options.APIKey = flag.String("apikey", "", "Shadertoy API key (from SHADERTOY_KEY env var if not set)")
-	options.ShaderID = flag.String("shader", "XlSSzV", "Shadertoy shader ID")
+	options.ShaderID = flag.String("shader", "XlSSzV", "Shadertoy shader ID or a comma-separated list of IDs")
 	options.Help = flag.Bool("help", false, "Show help message")
 	options.Mode = flag.String("mode", "Live", "Rendering mode: Live, Record, or Stream (case-insensitive)")
 	options.Duration = flag.Float64("duration", 10.0, "Duration to record in seconds")
@@ -282,21 +341,34 @@ func main() {
 		finalAPIKey = os.Getenv("SHADERTOY_KEY")
 	}
 
-	log.Printf("Fetching shader with ID: %s", *options.ShaderID)
-	shaderJSON, err := api.ShaderFromID(finalAPIKey, *options.ShaderID, true)
+	// Parse the comma-separated shader ID list
+	shaderIDs := strings.Split(*options.ShaderID, ",")
+	if len(shaderIDs) == 0 || shaderIDs[0] == "" {
+		log.Fatalf("No shader ID provided. Use the -shader flag to specify a single ID or a comma-separated list.")
+	}
+	// Trim any whitespace from user input
+	for i := range shaderIDs {
+		shaderIDs[i] = strings.TrimSpace(shaderIDs[i])
+	}
+
+	// Fetch the FIRST shader in the list to use for initialization.
+	initialShaderID := shaderIDs[0]
+	log.Printf("Fetching initial shader with ID: %s", initialShaderID)
+	shaderJSON, err := api.ShaderFromID(finalAPIKey, initialShaderID, true)
 	if err != nil {
-		log.Fatalf("Error fetching shader from ID: %v", err)
+		log.Fatalf("Error fetching initial shader %s: %v", initialShaderID, err)
 	}
 
-	shaderArgs, err := api.ShaderArgsFromJSON(shaderJSON, true)
+	initialShaderArgs, err := api.ShaderArgsFromJSON(shaderJSON, true)
 	if err != nil {
-		log.Fatalf("Error processing shader JSON: %v", err)
+		log.Fatalf("Error processing initial shader JSON: %v", err)
 	}
-	log.Printf("Successfully processed shader: %s", shaderArgs.Title)
+	log.Printf("Successfully processed initial shader: %s", initialShaderArgs.Title)
 
-	if !shaderArgs.Complete {
-		log.Println("Warning: Shader arguments may be incomplete (e.g., missing textures or unsupported inputs).")
+	if !initialShaderArgs.Complete {
+		log.Println("Warning: Initial shader arguments may be incomplete (e.g., missing textures or unsupported inputs).")
 	}
 
-	runShadertoy(shaderArgs, options)
+	// Pass the initial parsed shader AND the full list of IDs to the run function.
+	runShadertoy(initialShaderArgs, shaderIDs, options)
 }

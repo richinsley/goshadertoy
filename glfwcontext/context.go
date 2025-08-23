@@ -13,6 +13,8 @@ type Context struct {
 	lastMouseClickX float64
 	lastMouseClickY float64
 	mouseWasDown    bool
+	// A map to store functions to be called on key presses.
+	keyCallbacks map[glfw.Key]func()
 }
 
 // New creates and initializes a new GLFW window and returns a Context object.
@@ -34,17 +36,36 @@ func New(width, height int, visible bool, share interface{}) (*Context, error) {
 		return nil, err
 	}
 
-	// Set the key callback for the window.
-	win.SetKeyCallback(keyCallback)
+	c := &Context{
+		window:       win,
+		keyCallbacks: make(map[glfw.Key]func()),
+	}
 
-	return &Context{window: win}, nil
+	// Set the key callback for the window to be the method on our new context instance.
+	win.SetKeyCallback(c.glfwKeyCallback)
+
+	return c, nil
 }
 
-// keyCallback is the function that will be called on a key event.
-func keyCallback(w *glfw.Window, key glfw.Key, scancode int, action glfw.Action, mods glfw.ModifierKey) {
-	// If the key is ESC and the action is Press, then set the window to close.
+// RegisterKeyCallback allows the main application to register a function to be
+// called when a specific key is pressed.
+func (c *Context) RegisterKeyCallback(key glfw.Key, f func()) {
+	c.keyCallbacks[key] = f
+}
+
+// glfwKeyCallback is the function that will be called by GLFW on a key event.
+// It now dispatches to our registered custom callbacks.
+func (c *Context) glfwKeyCallback(w *glfw.Window, key glfw.Key, scancode int, action glfw.Action, mods glfw.ModifierKey) {
+	// Handle the default Escape key behavior
 	if key == glfw.KeyEscape && action == glfw.Press {
 		w.SetShouldClose(true)
+	}
+
+	// If a key is pressed and we have a callback for it, run it.
+	if action == glfw.Press {
+		if callback, ok := c.keyCallbacks[key]; ok {
+			callback()
+		}
 	}
 }
 
