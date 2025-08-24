@@ -559,13 +559,46 @@ func downloadMediaChannels(inputs []Input, passType string, useCache bool) ([]*S
 
 // ShaderFromID fetches a shader's JSON data from Shadertoy.com by its ID.
 func ShaderFromID(apikey string, idOrURL string, useCache bool) (*ShadertoyResponse, error) {
-	if useCache {
+	// check if idOrURL ends with a file extension (*.json, or *.frag)
+	if strings.HasSuffix(idOrURL, ".frag") {
+		// load the frag file as a string
+		data, err := os.ReadFile(idOrURL)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read frag file %s: %w", idOrURL, err)
+		}
+		// assemble a ShadertoyResponse with frag as the sole main pass
+		var shaderResp ShadertoyResponse
+		shaderResp.Shader = &Shader{
+			ShaderInfo{
+				ID:   "localfile",
+				Name: filepath.Base(idOrURL),
+			},
+			[]RenderPass{
+				{
+					Code: string(data),
+					Name: "Image",
+					Type: "image",
+				},
+			},
+		}
+		return &shaderResp, nil
+	}
+
+	// Check if the shader is already cached
+	hasjsonsuffix := strings.HasSuffix(idOrURL, ".json")
+	if useCache || hasjsonsuffix {
 		// If using cache, we should check if the shader is already cached.
 		cacheDir, err := getCacheDir("shaders")
 		if err != nil {
 			return nil, fmt.Errorf("could not get cache directory: %w", err)
 		}
-		cachePath := filepath.Join(cacheDir, idOrURL+".json")
+		var cachePath string
+		if !hasjsonsuffix {
+			cachePath = filepath.Join(cacheDir, idOrURL+".json")
+		} else {
+			cachePath = idOrURL
+		}
+
 		// "/Users/richardinsley/Library/Caches/shadertoy/shaders/tfKSz3.json"
 		if _, err := os.Stat(cachePath); err == nil {
 			// Shader is cached, read from file
