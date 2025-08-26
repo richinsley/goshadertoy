@@ -5,6 +5,7 @@ import (
 	"runtime"
 
 	glfw "github.com/go-gl/glfw/v3.3/glfw"
+	options "github.com/richinsley/goshadertoy/options"
 )
 
 // Context now tracks mouse state for the GetMouseInput method.
@@ -18,12 +19,19 @@ type Context struct {
 }
 
 // New creates and initializes a new GLFW window and returns a Context object.
-func New(width, height int, visible bool, share interface{}) (*Context, error) {
+// func New(width, height int, visible bool, share interface{}) (*Context, error) {
+func New(options *options.ShaderOptions, visible bool, share interface{}) (*Context, error) {
 	sharecontext, _ := share.(*glfw.Window)
 	glfw.WindowHint(glfw.ContextVersionMajor, 4)
 	glfw.WindowHint(glfw.ContextVersionMinor, 1)
 	glfw.WindowHint(glfw.OpenGLProfile, glfw.OpenGLCoreProfile)
 	glfw.WindowHint(glfw.OpenGLForwardCompatible, glfw.True)
+
+	if *options.BitDepth > 8 {
+		glfw.WindowHint(glfw.RedBits, 16)
+		glfw.WindowHint(glfw.GreenBits, 16)
+		glfw.WindowHint(glfw.BlueBits, 16)
+	}
 
 	if visible {
 		glfw.WindowHint(glfw.Resizable, glfw.True)
@@ -31,7 +39,7 @@ func New(width, height int, visible bool, share interface{}) (*Context, error) {
 		glfw.WindowHint(glfw.Visible, glfw.False)
 	}
 
-	win, err := glfw.CreateWindow(width, height, "goshadertoy", nil, sharecontext)
+	win, err := glfw.CreateWindow(*options.Width, *options.Height, "goshadertoy", nil, sharecontext)
 	if err != nil {
 		return nil, err
 	}

@@ -275,7 +275,6 @@ func (r *Renderer) runStreamMode(options *options.ShaderOptions) error {
 				return ffEncoder.Close()
 			}
 
-			// CORRECTED: Use the public SendVideo method
 			ffEncoder.SendVideo(&encoder.Frame{Pixels: pixels, PTS: frameCounter})
 			frameCounter++
 		}

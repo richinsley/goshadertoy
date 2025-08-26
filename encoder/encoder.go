@@ -122,9 +122,17 @@ func NewFFmpegEncoder(opts *options.ShaderOptions) (*FFmpegEncoder, error) {
 	cFilename := C.CString(*opts.OutputFile)
 	defer C.free(unsafe.Pointer(cFilename))
 
-	// Allocate format context
-	if C.avformat_alloc_output_context2(&e.formatCtx, nil, nil, cFilename) < 0 {
-		return nil, fmt.Errorf("could not allocate output context")
+	if *opts.Mode == "stream" {
+		cFormatName := C.CString("mpegts")
+		defer C.free(unsafe.Pointer(cFormatName))
+		if C.avformat_alloc_output_context2(&e.formatCtx, nil, cFormatName, cFilename) < 0 {
+			return nil, fmt.Errorf("could not allocate output context")
+		}
+	} else {
+		// Allocate format context - let ffmpeg decide format based on filename
+		if C.avformat_alloc_output_context2(&e.formatCtx, nil, nil, cFilename) < 0 {
+			return nil, fmt.Errorf("could not allocate output context")
+		}
 	}
 
 	// Find and add video stream

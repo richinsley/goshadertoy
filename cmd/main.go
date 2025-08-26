@@ -160,13 +160,13 @@ func runShadertoy(initialShaderArgs *api.ShaderArgs, shaderIDs []string, options
 		}
 		defer glfwcontext.TerminateGraphics()
 
-		visualContext, err = glfwcontext.New(*options.Width, *options.Height, !isRecord, nil)
+		visualContext, err = glfwcontext.New(options, !isRecord, nil)
 		if err != nil {
 			log.Fatalf("Failed to create visual GLFW context: %v", err)
 		}
 		if options.HasSoundShader {
 			// Create a second, hidden, shared context for the sound renderer
-			soundContext, err = glfwcontext.New(1, 1, false, visualContext.GetWindow())
+			soundContext, err = glfwcontext.New(options, false, visualContext.GetWindow())
 			if err != nil {
 				log.Fatalf("Failed to create hidden sound context: %v", err)
 			}
