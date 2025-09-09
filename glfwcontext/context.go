@@ -32,7 +32,7 @@ func New(options *options.ShaderOptions, visible bool, share interface{}) (*Cont
 		glfw.WindowHint(glfw.GreenBits, 16)
 		glfw.WindowHint(glfw.BlueBits, 16)
 		glfw.WindowHint(glfw.AlphaBits, 16)
-		glfw.WindowHint(glfw.ContextCreationAPI, glfw.EGLContextAPI)
+		// glfw.WindowHint(glfw.ContextCreationAPI, glfw.EGLContextAPI)
 	}
 
 	if visible {

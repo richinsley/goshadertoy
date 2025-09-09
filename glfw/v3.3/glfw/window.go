@@ -15,7 +15,6 @@ package glfw
 import "C"
 
 import (
-	"fmt"
 	"image"
 	"sync"
 	"unsafe"
@@ -352,7 +351,6 @@ func CreateWindow(width, height int, title string, monitor *Monitor, share *Wind
 
 	wnd := &Window{data: w}
 	windows.put(wnd)
-	fmt.Println("should be hdr")
 	return wnd, nil
 }
 
