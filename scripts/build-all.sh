@@ -1,23 +1,29 @@
 #!/bin/bash
 set -e
 
-echo "================================================="
-echo "  STARTING STATIC TOOLCHAIN BUILD"
-echo "  Installation Prefix: ${PREFIX}"
-echo "================================================="
+# Default to general build if no argument provided
+BUILD_TYPE="${1:-general}"
 
-# Create a temporary directory for downloading and compiling source code
-mkdir -p /opt/build
-cd /opt/build
+echo "=== Building FFmpeg Static Libraries (${BUILD_TYPE}) ==="
 
-echo "\n>>> Building Dependencies (x264, x265)..."
+# Build dependencies (common to both builds)
 /usr/local/bin/build-deps.sh
 
-echo "\n>>> Building FFmpeg-Arcana..."
-/usr/local/bin/build-ffmpeg.sh
+# Build FFmpeg based on the specified type
+case "${BUILD_TYPE}" in
+    "nvidia")
+        echo "=== Building with NVIDIA support ==="
+        /usr/local/bin/build-ffmpeg-nvidia.sh
+        ;;
+    "general"|"portable")
+        echo "=== Building portable version (no NVIDIA) ==="
+        /usr/local/bin/build-ffmpeg-general.sh
+        ;;
+    *)
+        echo "Error: Unknown build type '${BUILD_TYPE}'"
+        echo "Usage: $0 [nvidia|general|portable]"
+        exit 1
+        ;;
+esac
 
-echo "\n================================================="
-echo "  BUILD COMPLETE"
-echo "  Artifacts are in ${PREFIX}"
-echo "  You can now find the toolchain in the host directory you mounted to ${PREFIX}."
-echo "================================================="
+echo "=== Build complete! ==="

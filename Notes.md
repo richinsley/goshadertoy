@@ -3,8 +3,18 @@
 ## Linux
 Linux requires Docker with the Nvidia Docker Toolkit
 ```bash
+# Build portable version (default)
 docker build -t ffmpeg-static-builder .
-mkdir -p ./release
+docker run --rm -v "$(pwd)/release:/dist" ffmpeg-static-builder
+
+# Or explicitly specify general
+docker run --rm -v "$(pwd)/release:/dist" ffmpeg-static-builder general
+
+# Build NVIDIA version
+docker run --rm -v "$(pwd)/release:/dist" ffmpeg-static-builder nvidia
+
+# Or use build args
+docker build --build-arg BUILD_TYPE=nvidia -t ffmpeg-static-builder .
 docker run --rm -v "$(pwd)/release:/dist" ffmpeg-static-builder
 ```
 
